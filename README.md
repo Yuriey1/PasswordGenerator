@@ -6,15 +6,16 @@
 
 ```
 C:\2\
-├── config.psd1              # Файл конфигурации
-├── Reset-DomainPasswords.ps1 # Основной скрипт
-├── Generate-Passwords.ps1   # Генератор тестовых паролей
-├── PasswordGenerator.psm1   # Модуль генерации паролей
-├── ADManager.psm1           # Модуль работы с Active Directory
-├── InfisicalManager.psm1    # Модуль работы с Infisical
-├── users.csv                # Исходный файл с пользователями
-├── backup\                  # Папка для резервных копий
-└── report-*.csv             # Отчёты о выполнении
+├── config.psd1                       # Файл конфигурации
+├── Reset-DomainPasswords.ps1         # Основной скрипт
+├── Reset-DomainPasswords-ByEmail.ps1 # Дополнительный скрипт поиска учетки по имени в email
+├── Generate-Passwords.ps1            # Генератор тестовых паролей
+├── PasswordGenerator.psm1            # Модуль генерации паролей
+├── ADManager.psm1                    # Модуль работы с Active Directory
+├── InfisicalManager.psm1             # Модуль работы с Infisical
+├── users.csv                         # Исходный файл с пользователями
+├── backup\                           # Папка для резервных копий
+└── report-*.csv                      # Отчёты о выполнении
 ```
 
 ## Требования
