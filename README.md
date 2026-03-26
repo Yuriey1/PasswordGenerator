@@ -16,8 +16,7 @@ C:\2\
 ├── ADManager.psm1                 # Модуль работы с Active Directory
 ├── ZimbraManager.psm1             # Модуль работы с Zimbra (SOAP API)
 ├── InfisicalManager.psm1          # Модуль работы с Infisical
-├── users.csv                      # CSV для AD скриптов
-├── zimbra-users.csv               # CSV для Zimbra скрипта
+├── users.csv                      # Единый CSV файл для всех скриптов
 ├── backup\                        # Папка для резервных копий
 └── report-*.csv                   # Отчёты о выполнении
 ```
@@ -139,29 +138,25 @@ C:\2\
 
 ## Формат CSV
 
-### Для AD скриптов (users.csv)
-
-**Reset-DomainPasswords.ps1** (поиск по ФИО):
-```csv
-Имя учетной записи;Email
-Иванов Иван Иванович;ivanov@gmkzoloto.ru
-Петров Петр Петрович;petrov@gmkzoloto.ru
-```
-
-**Reset-DomainPasswords-ByEmail.ps1** (поиск по email):
-```csv
-Имя учетной записи;email
-Механик уч. Пит-Городок;meh-pit@gmkzoloto.ru
-Охрана Караган;oharanakaragan@gmkzoloto.ru
-```
-
-### Для Zimbra скрипта (zimbra-users.csv)
+Все скрипты используют единый файл `users.csv` (путь настраивается в `config.psd1` → `IO.InputCsvPath`):
 
 ```csv
 Имя учетной записи;email
 Иванов Иван Иванович;ivanov@ag.gold
 Петров Петр Петрович;petrov@krasintegra.ru
+Механик уч. Пит-Городок;meh-pit@gmkzoloto.ru
 ```
+
+**Формат:**
+- Первая колонка — ФИО пользователя (или любое имя/описание)
+- Колонка `email` — email адрес пользователя
+- Разделитель — точка с запятой (`;`)
+- Кодировка — UTF-8 (можно изменить в конфиге на `Windows1251`)
+
+**Принцип работы:**
+- Скрипт извлекает логин из email (часть до `@`)
+- Домен из email определяет environment для экспорта в Infisical
+- Логин нормализуется к нижнему регистру при поиске и сохранении
 
 ## Использование
 
