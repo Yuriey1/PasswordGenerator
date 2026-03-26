@@ -35,6 +35,17 @@
             "vagon-k.ru" = "vagon-k-ru"
             "tkkrasline.ru" = "tkkrasline-ru"
         }
+        # Порядок поиска паролей (имена environments)
+        EnvironmentOrder = @(
+            "AD/gmkzoloto.ru"
+            "krasintegra.ru"
+            "ag.gold"
+            "kc124.ru"
+            "krasprom.com"
+            "sibzoloto24.ru"
+            "vagon-k.ru"
+            "tkkrasline.ru"
+        )
     }
     
     IO = @{

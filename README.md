@@ -24,9 +24,9 @@ C:\2\
 
 ## Требования
 
-- Windows Server / Windows 10+ с PowerShell 5.1
+- Windows Server / Windows 10+ с PowerShell 5.1+
 - Модуль Active Directory (`RSAT-AD-PowerShell`) — для AD скриптов
-- Infisical CLI (установка: `winget install Infisical`)
+- Infisical CLI v0.43.62+ (установка: см. ниже)
 - Доступ к контроллеру домена
 - Доступ к Infisical серверу
 - Доступ к Zimbra серверу — для Zimbra скрипта
@@ -44,9 +44,12 @@ C:\2\
    ```
 4. Установите Infisical CLI:
    ```powershell
-   winget install Infisical
+   # Скачать с GitHub
+   # https://github.com/Infisical/cli/releases/latest
+   
+   # Или через winget
+   winget install Infisical.cli
    ```
-5. Настройте конфигурационные файлы
 
 ## Конфигурация
 
@@ -64,16 +67,43 @@ C:\2\
         IncludeUppercase = $true           # Заглавные буквы
         IncludeLowercase = $true           # Строчные буквы
         IncludeDigits = $true              # Цифры
-        IncludeSpecial = $true             # Специальные символы
-        SpecialChars = "!@#$%^&*()_+-=[]{}|;:,.<>?"
+        IncludeSpecialChars = $true        # Специальные символы
+        MinUppercase = 2
+        MinLowercase = 2
+        MinDigits = 2
+        MinSpecialChars = 2
+        ExcludeAmbiguous = $true           # Исключить 0, O, 1, l, I
     }
     
     Infisical = @{
         ApiUrl = "https://infisical.krasintegra.ru"
         ServiceToken = "st.xxx"
         WorkspaceId = "xxx"
-        Environment = "dev"
         SecretPath = "/"
+        
+        # Маппинг environment name -> slug
+        Environments = @{
+            "AD/gmkzoloto.ru" = "prod"
+            "krasintegra.ru" = "krasintegra-ru"
+            "ag.gold" = "ag-gold"
+            "kc124.ru" = "kc124-ru"
+            "krasprom.com" = "krasprom-com"
+            "sibzoloto24.ru" = "sibzoloto-ru"
+            "vagon-k.ru" = "vagon-k-ru"
+            "tkkrasline.ru" = "tkkrasline-ru"
+        }
+        
+        # Порядок поиска паролей (имена environments)
+        EnvironmentOrder = @(
+            "AD/gmkzoloto.ru"
+            "krasintegra.ru"
+            "ag.gold"
+            "kc124.ru"
+            "krasprom.com"
+            "sibzoloto24.ru"
+            "vagon-k.ru"
+            "tkkrasline.ru"
+        )
     }
     
     IO = @{
@@ -99,10 +129,10 @@ C:\2\
 ```powershell
 @{
     Zimbra = @{
-        ServerUrl = "https://mail.gmkzoloto.ru"
-        AdminUser = "admin@gmkzoloto.ru"
+        ServerUrl = "https://mail.gmkzoloto.ru:7071"
+        AdminUser = "admin@domain.ru"
         AdminPassword = "ваш_пароль_админа"
-        Domain = "gmkzoloto.ru"
+        Domain = "domain.ru"
     }
 }
 ```
@@ -122,18 +152,66 @@ C:\2\
 ```csv
 Имя учетной записи;email
 Механик уч. Пит-Городок;meh-pit@gmkzoloto.ru
-Охрана Караган;ohranakaragan@gmkzoloto.ru
+Охрана Караган;oharanakaragan@gmkzoloto.ru
 ```
 
 ### Для Zimbra скрипта (zimbra-users.csv)
 
 ```csv
 Имя учетной записи;email
-Иванов Иван;ivanov@gmkzoloto.ru
-Петров Петр;petrov@gmkzoloto.ru
+Иванов Иван Иванович;ivanov@ag.gold
+Петров Петр Петрович;petrov@krasintegra.ru
 ```
 
 ## Использование
+
+### Reset-ZimbraPasswords.ps1 — Zimbra (основной скрипт)
+
+```powershell
+# Тестовый режим (показывает что будет сделано)
+.\Reset-ZimbraPasswords.ps1 -DryRun
+
+# Рабочий запуск
+.\Reset-ZimbraPasswords.ps1
+
+# С отладкой
+.\Reset-ZimbraPasswords.ps1 -DebugMode
+
+# Пропустить Zimbra (только генерация и экспорт)
+.\Reset-ZimbraPasswords.ps1 -SkipZimbra
+
+# Пропустить экспорт в Infisical
+.\Reset-ZimbraPasswords.ps1 -SkipInfisical
+
+# Принудительный запуск без подтверждения
+.\Reset-ZimbraPasswords.ps1 -Force
+```
+
+**Алгоритм работы:**
+
+1. **Загрузка конфигурации** — чтение маппинга environments и порядка поиска
+2. **Нормализация логина** — логин приводится к нижнему регистру для поиска
+3. **Поиск существующих паролей** — перебор environments в указанном порядке:
+   - Загружает все секреты из environment
+   - Сравнивает ФИО и нормализованный логин
+   - Сначала ищет в `AD/gmkzoloto.ru`
+   - Если не найден — ищет в `krasintegra.ru`
+   - И так далее по списку `EnvironmentOrder`
+4. **Переиспользование или генерация**:
+   - Если пароль найден в любом environment — использует его
+   - Если не найден нигде — генерирует новый
+5. **Смена пароля в Zimbra** — через SOAP API (`SetPasswordRequest`)
+6. **Экспорт в Infisical** — в environment, соответствующий домену пользователя (логин в нижнем регистре)
+
+**Пример:**
+```
+Email: ivanov@ag.gold
+1. Поиск пароля в AD/gmkzoloto.ru → не найден
+2. Поиск пароля в krasintegra.ru → не найден
+3. Поиск пароля в ag.gold → найден! → использовать этот пароль
+4. Сменить пароль в Zimbra
+5. Экспортировать в environment "ag.gold" (slug: ag-gold)
+```
 
 ### Reset-DomainPasswords.ps1 — AD поиск по ФИО
 
@@ -146,16 +224,7 @@ C:\2\
 
 # Принудительный запуск без подтверждения
 .\Reset-DomainPasswords.ps1 -Force
-
-# Указать другой CSV
-.\Reset-DomainPasswords.ps1 -InputCsv ".\other-users.csv"
 ```
-
-**Алгоритм:**
-1. Читает ФИО из CSV
-2. Ищет пользователя в AD по DisplayName
-3. Меняет пароль
-4. Экспортирует в Infisical
 
 ### Reset-DomainPasswords-ByEmail.ps1 — AD поиск по email
 
@@ -166,37 +235,6 @@ C:\2\
 # Рабочий запуск
 .\Reset-DomainPasswords-ByEmail.ps1
 ```
-
-**Алгоритм:**
-1. Извлекает логин из email (часть до @)
-2. Ищет пользователя в AD по SamAccountName
-3. Меняет пароль
-4. Экспортирует в Infisical
-
-**Пример:**
-```
-Email: meh-pit@gmkzoloto.ru
-→ Поиск в AD: SamAccountName = "meh-pit"
-```
-
-### Reset-ZimbraPasswords.ps1 — Zimbra
-
-```powershell
-# Тестовый режим
-.\Reset-ZimbraPasswords.ps1 -DryRun
-
-# Рабочий запуск
-.\Reset-ZimbraPasswords.ps1
-
-# Указать другие конфиги
-.\Reset-ZimbraPasswords.ps1 -ConfigPath ".\my-config.psd1" -ZimbraConfigPath ".\my-zimbra.psd1"
-```
-
-**Алгоритм:**
-1. Авторизация в Zimbra через SOAP API
-2. Получение ID аккаунта по email
-3. Установка нового пароля через ModifyAccountRequest
-4. Экспорт в Infisical
 
 ### Generate-Passwords.ps1 — Генератор паролей
 
@@ -215,16 +253,30 @@ Email: meh-pit@gmkzoloto.ru
 
 Секреты именуются по шаблону:
 ```
-Фамилия_Имя_Отчество_(login)_PASSWORD
+Фамилия Имя Отчество (login)
 ```
 
 **Примеры:**
 ```
-Чжоу_Михаил_Александрович_(cma001)_PASSWORD
-Механик_уч._Пит-Городок_(meh-pit@gmkzoloto.ru)_PASSWORD
+Иванов Иван Иванович (ivanov)
+Петров Петр Петрович (petrov)
 ```
 
-Пробелы заменяются на подчёркивания.
+**Важно:** При поиске и сохранении секретов логин нормализуется к нижнему регистру. Это позволяет находить пароли даже если в разных системах логин записан в разном регистре (например, `AEG004` в AD и `aeg004` в Zimbra будут распознаны как один пользователь).
+
+## Структура environments в Infisical
+
+```
+Project (WorkspaceId)
+├── Environment: AD/gmkzoloto.ru (slug: prod)
+│   └── "Иванов Иван Иванович (ivanov)" = "password123"
+├── Environment: ag.gold (slug: ag-gold)
+│   └── "Иванов Иван Иванович (ivanov)" = "password123"
+├── Environment: krasintegra.ru (slug: krasintegra-ru)
+│   └── "Петров Петр Петрович (petrov)" = "password456"
+```
+
+**Важно:** Service Token должен иметь права на запись во все environments.
 
 ## Параметры командной строки
 
@@ -245,35 +297,51 @@ Email: meh-pit@gmkzoloto.ru
 | Параметр | Описание |
 |----------|----------|
 | `-ZimbraConfigPath` | Путь к конфигу Zimbra (по умолчанию `.\config-zimbra.psd1`) |
+| `-DebugMode` | Вывод отладочной информации (SOAP запросы/ответы) |
 
 ## Выходные файлы
 
 ### Backup
-- AD: `.\backup\passwords-YYYYMMDD-HHMMSS.csv`
 - Zimbra: `.\backup\zimbra-passwords-YYYYMMDD-HHMMSS.csv`
-- Содержит: Username, SamAccountName/Email, Password, Strength, Timestamp
+- Содержит: Username, Login, Email, Domain, Password, PasswordSource, FoundInEnv, ZimbraChanged, InfisicalExported, Timestamp
 
 ### Report
-- AD: `.\report-YYYYMMDD-HHMMSS.csv`
-- Zimbra: `.\zimbra-report-YYYYMMDD-HHMMSS.csv`
-- Содержит: Username, SamAccountName, Email, PasswordGenerated, PasswordChanged, InfisicalExported, Timestamp
+- `.\report-YYYYMMDD-HHMMSS.csv`
+- Содержит: Username, Login, Email, Domain, PasswordSource, ADPasswordChanged, InfisicalExported, Environment, Timestamp
 
 ## Zimbra SOAP API
 
-Скрипт использует Zimbra Admin SOAP API:
+Скрипт использует Zimbra Admin SOAP API на порту 7071:
 
 1. **AuthRequest** — авторизация администратора, получение authToken
 2. **GetAccountRequest** — получение ID аккаунта по email
-3. **ModifyAccountRequest** — установка нового пароля
+3. **SetPasswordRequest** — установка нового пароля
 
 Пример SOAP запроса для авторизации:
 ```xml
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+  <soap:Header>
+    <context xmlns="urn:zimbra"/>
+  </soap:Header>
   <soap:Body>
     <AuthRequest xmlns="urn:zimbraAdmin">
       <name>admin@example.com</name>
       <password>password</password>
     </AuthRequest>
+  </soap:Body>
+</soap:Envelope>
+```
+
+Пример SetPasswordRequest:
+```xml
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+  <soap:Header>
+    <context xmlns="urn:zimbra">
+      <authToken>полученный_токен</authToken>
+    </context>
+  </soap:Header>
+  <soap:Body>
+    <SetPasswordRequest xmlns="urn:zimbraAdmin" id="account-id" newPassword="newPassword123"/>
   </soap:Body>
 </soap:Envelope>
 ```
@@ -284,13 +352,21 @@ Email: meh-pit@gmkzoloto.ru
 
 1. Войдите в Infisical: `https://infisical.krasintegra.ru`
 2. Перейдите в Project → Settings → Service Tokens
-3. Создайте токен с правами на запись секретов
+3. Создайте токен с правами на **запись секретов во все environments**
 4. Скопируйте `Service Token` и `Project ID` в `config.psd1`
+
+### Определение slug для environment
+
+```powershell
+# Проверить что slug правильный
+infisical secrets list --env=ag-gold --projectId=ВАШ_ID --token=ВАШ_ТОКЕН --domain=https://infisical.krasintegra.ru
+```
 
 ### Проверка CLI
 
 ```powershell
-infisical version
+infisical --version
+# Должно быть: infisical version 0.43.62 или выше
 ```
 
 ## Решение проблем
@@ -303,15 +379,18 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 ### Ошибка "Config parsing error"
 Убедитесь, что в `.psd1` файлах нет комментариев внутри хеш-таблицы.
 
-### Пользователь не найден в AD (по ФИО)
+### Ошибка "environment not found for domain"
+Проверьте, что домен из email есть в маппинге `Environments`:
 ```powershell
-Get-ADUser -Filter * | Where-Object { $_.DisplayName -match "Фамилия" }
+# Email: user@newdomain.ru
+# Должно быть в конфиге:
+Environments = @{
+    "newdomain.ru" = "newdomain-slug"
+}
 ```
 
-### Пользователь не найден в AD (по логину)
-```powershell
-Get-ADUser -Filter "SamAccountName -eq 'login'"
-```
+### Ошибка Infisical "You are not allowed to create on secrets"
+Service Token не имеет прав на запись в этот environment. Создайте токен с правами на все нужные environments.
 
 ### Ошибка Infisical "unsupported protocol scheme"
 Убедитесь, что `ApiUrl` содержит полный адрес с `https://`.
@@ -320,11 +399,14 @@ Get-ADUser -Filter "SamAccountName -eq 'login'"
 Аккаунт с указанным email не существует на сервере Zimbra.
 
 ### Ошибка Zimbra "connection refused"
-Проверьте доступность сервера и правильность URL в `config-zimbra.psd1`.
+Проверьте доступность сервера и правильность URL в `config-zimbra.psd1`. Порт 7071 должен быть доступен.
+
+### Ошибка Zimbra 500 Server Error
+Проверьте отладочный вывод `-DebugMode` для анализа SOAP ответа.
 
 ## Безопасность
 
-- Пароли генерируются криптографически стойким генератором
+- Пароли генерируются криптографически стойким генератором (`System.Security.Cryptography.RandomNumberGenerator`)
 - Service Token даёт доступ только к указанному Project
 - Пароль администратора Zimbra хранится в конфиге в открытом виде — ограничьте доступ к файлу
 - Локальные бэкапы содержат пароли в открытом виде — защитите папку `backup\`

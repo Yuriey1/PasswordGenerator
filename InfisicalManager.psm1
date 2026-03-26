@@ -59,6 +59,53 @@ function Get-InfisicalEnvironments {
     return [PSCustomObject]$result
 }
 
+function Get-AllInfisicalSecrets {
+    param(
+        [string]$ServiceToken,
+        [string]$WorkspaceId,
+        [string]$EnvironmentSlug,
+        [string]$SecretPath = "/",
+        [string]$ApiUrl,
+        [string]$CliPath = "infisical"
+    )
+    
+    $secrets = @()
+    
+    try {
+        # Get all secrets in environment
+        $output = & $CliPath secrets `
+            "--env=$EnvironmentSlug" `
+            "--path=$SecretPath" `
+            "--projectId=$WorkspaceId" `
+            "--token=$ServiceToken" `
+            "--domain=$ApiUrl" 2>&1
+        
+        $outputStr = $output -join "`n"
+        
+        # Parse table output: │ SECRET_NAME │ SECRET_VALUE │ ...
+        $lines = $outputStr -split "`n"
+        foreach ($line in $lines) {
+            # Match: │ SECRET_NAME │ SECRET_VALUE │ SECRET_TYPE │
+            if ($line -match "│\s*([^│]+?)\s*│\s*([^│]+?)\s*│\s*[^│]+\s*│") {
+                $key = $matches[1].Trim()
+                $value = $matches[2].Trim()
+                
+                if ($key -and $key -ne "SECRET NAME" -and $key -ne "SECRET_VALUE" -and $key -notmatch "^─+$") {
+                    $secrets += [PSCustomObject]@{
+                        Key = $key
+                        Value = $value
+                    }
+                }
+            }
+        }
+    }
+    catch {
+        Write-Host "    [DEBUG] Error getting secrets: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+    
+    return $secrets
+}
+
 function Find-InfisicalSecretInAllEnvironments {
     param(
         [string]$FIO,
@@ -66,6 +113,7 @@ function Find-InfisicalSecretInAllEnvironments {
         [string]$ServiceToken,
         [string]$WorkspaceId,
         [hashtable]$EnvironmentMap,  # @{ "name" = "slug" }
+        [array]$EnvironmentOrder,     # @("env1", "env2", ...) - order to search
         [string]$SecretPath = "/",
         [string]$ApiUrl,
         [string]$CliPath = "infisical"
@@ -80,49 +128,71 @@ function Find-InfisicalSecretInAllEnvironments {
         Error = $null
     }
     
-    # Format: "Фамилия Имя Отчество (login)"
-    $secretName = "$FIO ($Login)"
+    # Normalize login and FIO to lowercase for consistent matching
+    $normalizedLogin = $Login.ToLower()
+    $normalizedFIO = $FIO.Trim()
     
-    foreach ($envName in $EnvironmentMap.Keys) {
+    # Target pattern for comparison (normalized)
+    $targetPattern = "$normalizedFIO ($normalizedLogin)"
+    
+    # If no order specified, use all keys from map
+    if (-not $EnvironmentOrder -or $EnvironmentOrder.Count -eq 0) {
+        $EnvironmentOrder = @($EnvironmentMap.Keys)
+    }
+    
+    # Search in specified order
+    foreach ($envName in $EnvironmentOrder) {
         $envSlug = $EnvironmentMap[$envName]
         
+        if (-not $envSlug) {
+            Write-Host "    [DEBUG] Skip '$envName' - no slug in mapping" -ForegroundColor DarkGray
+            continue
+        }
+        
         try {
-            $output = & $CliPath secrets get $secretName `
-                "--env=$envSlug" `
-                "--path=$SecretPath" `
-                "--projectId=$WorkspaceId" `
-                "--token=$ServiceToken" `
-                "--domain=$ApiUrl" 2>&1
+            Write-Host "    [DEBUG] Searching in '$envName' (slug=$envSlug)..." -ForegroundColor DarkGray
             
-            $outputStr = $output -join "`n"
+            # Get ALL secrets in this environment
+            $allSecrets = Get-AllInfisicalSecrets `
+                -ServiceToken $ServiceToken `
+                -WorkspaceId $WorkspaceId `
+                -EnvironmentSlug $envSlug `
+                -SecretPath $SecretPath `
+                -ApiUrl $ApiUrl `
+                -CliPath $CliPath
             
-            # Check if found
-            if ($outputStr -match "\*not found\*" -or $outputStr -match "not found") {
-                continue  # Try next environment
-            }
+            Write-Host "    [DEBUG] Found $($allSecrets.Count) secrets in '$envName'" -ForegroundColor DarkGray
             
-            # Parse value
-            $lines = $outputStr -split "`n"
-            foreach ($line in $lines) {
-                if ($line -match "│\s*[^│]+\s*│\s*([^│]+)\s*│\s*[^│]+\s*│") {
-                    $value = $matches[1].Trim()
-                    if ($value -and $value -ne "*not found*" -and $value -ne "SECRET VALUE") {
+            # Search for matching secret (case-insensitive)
+            foreach ($secret in $allSecrets) {
+                # Extract FIO and login from secret key
+                # Format: "Фамилия Имя Отчество (login)"
+                if ($secret.Key -match "^(.+?)\s*\(([^)]+)\)$") {
+                    $secretFIO = $matches[1].Trim()
+                    $secretLogin = $matches[2].Trim().ToLower()
+                    
+                    # Compare normalized values
+                    $secretPattern = "$secretFIO ($secretLogin)"
+                    
+                    if ($secretPattern -eq $targetPattern) {
                         $result.Found = $true
-                        $result.SecretKey = $secretName
-                        $result.Value = $value
+                        $result.SecretKey = $secret.Key  # Keep original key for reference
+                        $result.Value = $secret.Value
                         $result.EnvironmentName = $envName
                         $result.EnvironmentSlug = $envSlug
+                        Write-Host "    [DEBUG] FOUND in '$envName': '$($secret.Key)' (normalized match)" -ForegroundColor DarkGray
                         return [PSCustomObject]$result
                     }
                 }
             }
         }
         catch {
-            # Continue to next environment
+            Write-Host "    [DEBUG] Error in '$envName': $($_.Exception.Message)" -ForegroundColor DarkGray
             continue
         }
     }
     
+    Write-Host "    [DEBUG] Not found in any environment" -ForegroundColor DarkGray
     return [PSCustomObject]$result
 }
 
@@ -321,6 +391,7 @@ Export-ModuleMember -Function @(
     'Test-InfisicalCLI',
     'Test-InfisicalCLICore',
     'Get-InfisicalEnvironments',
+    'Get-AllInfisicalSecrets',
     'Find-InfisicalSecretInAllEnvironments',
     'Get-InfisicalSecretByFioAndLogin',
     'Set-InfisicalSecretCLI',
