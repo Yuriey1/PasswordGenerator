@@ -66,7 +66,8 @@ function Get-AllInfisicalSecrets {
         [string]$EnvironmentSlug,
         [string]$SecretPath = "/",
         [string]$ApiUrl,
-        [string]$CliPath = "infisical"
+        [string]$CliPath = "infisical",
+        [switch]$DebugMode
     )
     
     $secrets = @()
@@ -100,7 +101,9 @@ function Get-AllInfisicalSecrets {
         }
     }
     catch {
-        Write-Host "    [DEBUG] Error getting secrets: $($_.Exception.Message)" -ForegroundColor DarkGray
+        if ($DebugMode) {
+            Write-Host "    [DEBUG] Error getting secrets: $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
     }
     
     return $secrets
@@ -116,7 +119,8 @@ function Find-InfisicalSecretInAllEnvironments {
         [array]$EnvironmentOrder,     # @("env1", "env2", ...) - order to search
         [string]$SecretPath = "/",
         [string]$ApiUrl,
-        [string]$CliPath = "infisical"
+        [string]$CliPath = "infisical",
+        [switch]$DebugMode
     )
     
     $result = @{
@@ -145,12 +149,16 @@ function Find-InfisicalSecretInAllEnvironments {
         $envSlug = $EnvironmentMap[$envName]
         
         if (-not $envSlug) {
-            Write-Host "    [DEBUG] Skip '$envName' - no slug in mapping" -ForegroundColor DarkGray
+            if ($DebugMode) {
+                Write-Host "    [DEBUG] Skip '$envName' - no slug in mapping" -ForegroundColor DarkGray
+            }
             continue
         }
         
         try {
-            Write-Host "    [DEBUG] Searching in '$envName' (slug=$envSlug)..." -ForegroundColor DarkGray
+            if ($DebugMode) {
+                Write-Host "    [DEBUG] Searching in '$envName' (slug=$envSlug)..." -ForegroundColor DarkGray
+            }
             
             # Get ALL secrets in this environment
             $allSecrets = Get-AllInfisicalSecrets `
@@ -159,9 +167,12 @@ function Find-InfisicalSecretInAllEnvironments {
                 -EnvironmentSlug $envSlug `
                 -SecretPath $SecretPath `
                 -ApiUrl $ApiUrl `
-                -CliPath $CliPath
+                -CliPath $CliPath `
+                -DebugMode:$DebugMode
             
-            Write-Host "    [DEBUG] Found $($allSecrets.Count) secrets in '$envName'" -ForegroundColor DarkGray
+            if ($DebugMode) {
+                Write-Host "    [DEBUG] Found $($allSecrets.Count) secrets in '$envName'" -ForegroundColor DarkGray
+            }
             
             # Search for matching secret (case-insensitive)
             foreach ($secret in $allSecrets) {
@@ -180,19 +191,25 @@ function Find-InfisicalSecretInAllEnvironments {
                         $result.Value = $secret.Value
                         $result.EnvironmentName = $envName
                         $result.EnvironmentSlug = $envSlug
-                        Write-Host "    [DEBUG] FOUND in '$envName': '$($secret.Key)' (normalized match)" -ForegroundColor DarkGray
+                        if ($DebugMode) {
+                            Write-Host "    [DEBUG] FOUND in '$envName': '$($secret.Key)' (normalized match)" -ForegroundColor DarkGray
+                        }
                         return [PSCustomObject]$result
                     }
                 }
             }
         }
         catch {
-            Write-Host "    [DEBUG] Error in '$envName': $($_.Exception.Message)" -ForegroundColor DarkGray
+            if ($DebugMode) {
+                Write-Host "    [DEBUG] Error in '$envName': $($_.Exception.Message)" -ForegroundColor DarkGray
+            }
             continue
         }
     }
     
-    Write-Host "    [DEBUG] Not found in any environment" -ForegroundColor DarkGray
+    if ($DebugMode) {
+        Write-Host "    [DEBUG] Not found in any environment" -ForegroundColor DarkGray
+    }
     return [PSCustomObject]$result
 }
 
@@ -205,7 +222,8 @@ function Get-InfisicalSecretByFioAndLogin {
         [string]$Environment = "dev",
         [string]$SecretPath = "/",
         [string]$ApiUrl,
-        [string]$CliPath = "infisical"
+        [string]$CliPath = "infisical",
+        [switch]$DebugMode
     )
     
     $result = @{
@@ -218,7 +236,9 @@ function Get-InfisicalSecretByFioAndLogin {
     # Format: "Фамилия Имя Отчество (login)"
     $secretName = "$FIO ($Login)"
     
-    Write-Host "[DEBUG] Searching: '$secretName'" -ForegroundColor DarkGray
+    if ($DebugMode) {
+        Write-Host "[DEBUG] Searching: '$secretName'" -ForegroundColor DarkGray
+    }
     
     try {
         $output = & $CliPath secrets get $secretName `
@@ -229,11 +249,15 @@ function Get-InfisicalSecretByFioAndLogin {
             "--domain=$ApiUrl" 2>&1
         
         $outputStr = $output -join "`n"
-        Write-Host "[DEBUG] Output: $outputStr" -ForegroundColor DarkGray
+        if ($DebugMode) {
+            Write-Host "[DEBUG] Output: $outputStr" -ForegroundColor DarkGray
+        }
         
         # Check for "not found" in output
         if ($outputStr -match "\*not found\*" -or $outputStr -match "not found") {
-            Write-Host "[DEBUG] Secret NOT found" -ForegroundColor DarkGray
+            if ($DebugMode) {
+                Write-Host "[DEBUG] Secret NOT found" -ForegroundColor DarkGray
+            }
             $result.Found = $false
             return [PSCustomObject]$result
         }
@@ -244,7 +268,9 @@ function Get-InfisicalSecretByFioAndLogin {
             # Match: │ SECRET_NAME │ SECRET_VALUE │ SECRET_TYPE │
             if ($line -match "│\s*[^│]+\s*│\s*([^│]+)\s*│\s*[^│]+\s*│") {
                 $value = $matches[1].Trim()
-                Write-Host "[DEBUG] Parsed value: '$value'" -ForegroundColor DarkGray
+                if ($DebugMode) {
+                    Write-Host "[DEBUG] Parsed value: '$value'" -ForegroundColor DarkGray
+                }
                 
                 if ($value -and $value -ne "*not found*" -and $value -ne "SECRET VALUE") {
                     $result.Found = $true
@@ -255,13 +281,15 @@ function Get-InfisicalSecretByFioAndLogin {
             }
         }
         
-        if (-not $result.Found) {
+        if (-not $result.Found -and $DebugMode) {
             Write-Host "[DEBUG] No valid value in output" -ForegroundColor DarkGray
         }
     }
     catch {
         $result.Error = $_.Exception.Message
-        Write-Host "[DEBUG] Error: $($_.Exception.Message)" -ForegroundColor DarkGray
+        if ($DebugMode) {
+            Write-Host "[DEBUG] Error: $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
     }
     
     return [PSCustomObject]$result
@@ -276,7 +304,8 @@ function Set-InfisicalSecretCLI {
         [string]$SecretKey,
         [string]$SecretValue,
         [string]$ApiUrl,
-        [string]$CliPath = "infisical"
+        [string]$CliPath = "infisical",
+        [switch]$DebugMode
     )
     
     $result = @{
@@ -291,7 +320,9 @@ function Set-InfisicalSecretCLI {
     }
     
     try {
-        Write-Host "    [CMD] infisical secrets set $SecretKey=*** --env=$Environment --projectId=$WorkspaceId --domain=$ApiUrl" -ForegroundColor DarkGray
+        if ($DebugMode) {
+            Write-Host "    [CMD] infisical secrets set $SecretKey=*** --env=$Environment --projectId=$WorkspaceId --domain=$ApiUrl" -ForegroundColor DarkGray
+        }
         
         $output = & $CliPath secrets set "$SecretKey=$SecretValue" `
             "--env=$Environment" `
@@ -322,7 +353,8 @@ function Import-BatchSecretsCLI {
         [string]$SecretPath = "/",
         [array]$Secrets,
         [string]$ApiUrl,
-        [string]$CliPath = "infisical"
+        [string]$CliPath = "infisical",
+        [switch]$DebugMode
     )
     
     $results = @()
@@ -330,7 +362,9 @@ function Import-BatchSecretsCLI {
     $errorCount = 0
     
     Write-Host "Importing $($Secrets.Count) secrets via CLI..." -ForegroundColor Cyan
-    Write-Host "[DEBUG] ApiUrl: $ApiUrl" -ForegroundColor DarkGray
+    if ($DebugMode) {
+        Write-Host "[DEBUG] ApiUrl: $ApiUrl" -ForegroundColor DarkGray
+    }
     
     foreach ($sec in $Secrets) {
         $name = $sec.SamAccountName
@@ -357,7 +391,8 @@ function Import-BatchSecretsCLI {
             -SecretKey $key `
             -SecretValue $sec.Password `
             -ApiUrl $ApiUrl `
-            -CliPath $CliPath
+            -CliPath $CliPath `
+            -DebugMode:$DebugMode
         
         $results += [PSCustomObject]@{
             Username = $sec.Username

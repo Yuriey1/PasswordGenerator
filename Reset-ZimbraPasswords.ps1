@@ -219,7 +219,8 @@ foreach ($u in $script:NormalizedUsers) {
             -EnvironmentMap $envMap `
             -EnvironmentOrder $envOrder `
             -SecretPath $ic.SecretPath `
-            -ApiUrl $ic.ApiUrl
+            -ApiUrl $ic.ApiUrl `
+            -DebugMode:$DebugMode
         
         if ($existingSecret.Found) {
             $existingPassword = $existingSecret.Value
@@ -384,7 +385,8 @@ if ($SkipInfisical) {
             -SecretPath $ic.SecretPath `
             -SecretKey $secretKey `
             -SecretValue $u.Password `
-            -ApiUrl $ic.ApiUrl
+            -ApiUrl $ic.ApiUrl `
+            -DebugMode:$DebugMode
         
         $infResults += [PSCustomObject]@{
             Username = $u.Username
