@@ -1,2 +1,0 @@
-Invoke-WebRequest -Uri "https://mail.gmkzoloto.ru:7071/service/wsdl/zimbraAdmin.xsd" -SkipCertificateCheck -UseBasicParsing | Select-Object -ExpandProperty Content | Out-File "C:\2\zimbraAdmin.xsd" -Encoding UTF8
-Get-Content "C:\2\zimbraAdmin.xsd"
