@@ -188,7 +188,7 @@ C:\2\
 2. **Нормализация логина** — логин приводится к нижнему регистру для поиска
 3. **Поиск существующих паролей** — перебор environments в указанном порядке:
    - Загружает все секреты из environment
-   - Сравнивает ФИО и нормализованный логин
+   - Сравнивает ФИО и нормализованный логин (оба в нижнем регистре)
    - Сначала ищет в `AD/gmkzoloto.ru`
    - Если не найден — ищет в `krasintegra.ru`
    - И так далее по списку `EnvironmentOrder`
@@ -196,16 +196,24 @@ C:\2\
    - Если пароль найден в любом environment — использует его
    - Если не найден нигде — генерирует новый
 5. **Смена пароля в Zimbra** — через SOAP API (`SetPasswordRequest`)
-6. **Экспорт в Infisical** — в environment, соответствующий домену пользователя (логин в нижнем регистре)
+6. **Экспорт в Infisical** — **ВСЕГДА** в environment текущего домена (из email):
+   - Это синхронизирует пароли между доменами
+   - Если пользователь работает в нескольких системах — его пароль будет везде одинаков
 
 **Пример:**
 ```
 Email: ivanov@ag.gold
-1. Поиск пароля в AD/gmkzoloto.ru → не найден
-2. Поиск пароля в krasintegra.ru → не найден
-3. Поиск пароля в ag.gold → найден! → использовать этот пароль
-4. Сменить пароль в Zimbra
-5. Экспортировать в environment "ag.gold" (slug: ag-gold)
+1. Поиск пароля в AD/gmkzoloto.ru → найден! → использовать этот пароль
+2. Сменить пароль в Zimbra (ag.gold)
+3. Экспортировать в environment "ag.gold" [from AD/gmkzoloto.ru -> to ag.gold]
+
+---
+
+Email: petrov@krasintegra.ru
+1. Поиск пароля во всех environments → не найден
+2. Генерация нового пароля
+3. Сменить пароль в Zimbra (krasintegra.ru)
+4. Экспортировать в environment "krasintegra.ru" [NEW to krasintegra.ru]
 ```
 
 ### Reset-DomainPasswords.ps1 — AD поиск по ФИО
@@ -257,7 +265,11 @@ Email: ivanov@ag.gold
 Петров Петр Петрович (petrov)
 ```
 
-**Важно:** При поиске и сохранении секретов логин нормализуется к нижнему регистру. Это позволяет находить пароли даже если в разных системах логин записан в разном регистре (например, `AEG004` в AD и `aeg004` в Zimbra будут распознаны как один пользователь).
+**Важно:** 
+- При поиске логин нормализуется к нижнему регистру для сравнения
+- При сохранении **нового** секрета логин записывается в нижнем регистре
+- При **переиспользовании** пароля используется оригинальный ключ (как было сохранено ранее)
+- Это предотвращает дублирование секретов с разным регистром логина (например `AAA005` vs `aaa005`)
 
 ## Структура environments в Infisical
 
@@ -298,7 +310,7 @@ Project (WorkspaceId)
 
 ### Backup
 - Zimbra: `.\backup\zimbra-passwords-YYYYMMDD-HHMMSS.csv`
-- Содержит: Username, Login, Email, Domain, Password, PasswordSource, FoundInEnv, ZimbraChanged, InfisicalExported, Timestamp
+- Содержит: Username, Login, Email, Domain, Password, PasswordSource, FoundInEnv, ExportEnv, SecretKey, ZimbraChanged, InfisicalExported, Timestamp
 
 ### Report
 - `.\report-YYYYMMDD-HHMMSS.csv`

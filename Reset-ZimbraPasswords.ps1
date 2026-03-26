@@ -208,6 +208,7 @@ foreach ($u in $script:NormalizedUsers) {
     $existingPassword = $null
     $passwordSource = "generated"
     $foundInEnv = $null
+    $foundSecretKey = $null  # Original key from found secret
     
     if (-not $SkipInfisical) {
         $existingSecret = Find-InfisicalSecretInAllEnvironments `
@@ -224,6 +225,7 @@ foreach ($u in $script:NormalizedUsers) {
             $existingPassword = $existingSecret.Value
             $passwordSource = "reused"
             $foundInEnv = $existingSecret.EnvironmentName
+            $foundSecretKey = $existingSecret.SecretKey  # Keep original key for export
             $reusedCount++
             Write-Host "  [REUSE] $fio ($login@$domain) - found in '$foundInEnv'" -ForegroundColor Cyan
         }
@@ -243,6 +245,16 @@ foreach ($u in $script:NormalizedUsers) {
         }
     }
     
+    # Determine export environment: ALWAYS export to current domain's environment
+    # (where we're resetting the password), regardless of where the password was found
+    $exportEnv = $domain
+    $exportEnvSlug = $envSlug
+    
+    # Determine secret key for export:
+    # - If password was found with existing key -> use that key (to update same secret)
+    # - If new password -> create key with normalized login
+    $exportSecretKey = if ($foundSecretKey) { $foundSecretKey } else { "$fio ($login)" }
+    
     $usersWithPasswords += [PSCustomObject]@{
         Username = $fio
         Email = $email
@@ -252,6 +264,9 @@ foreach ($u in $script:NormalizedUsers) {
         Password = $existingPassword
         PasswordSource = $passwordSource
         FoundInEnv = $foundInEnv
+        ExportEnv = $exportEnv
+        ExportEnvSlug = $exportEnvSlug
+        ExportSecretKey = $exportSecretKey
     }
 }
 
@@ -335,18 +350,24 @@ if ($SkipInfisical) {
             continue
         }
         
-        # Secret key format: "Фамилия Имя Отчество (login)"
-        $secretKey = "$($u.Username) ($($u.Login))"
+        # Use the export secret key (original key if found, or new key with normalized login)
+        $secretKey = $u.ExportSecretKey
         
-        Write-Host "  Exporting: $secretKey" -NoNewline
-        Write-Host " [env=$($u.Domain), slug=$($u.EnvSlug)]" -NoNewline -ForegroundColor DarkGray
+        # Show export destination with source info
+        if ($u.PasswordSource -eq "reused") {
+            Write-Host "  Exporting: $secretKey" -NoNewline
+            Write-Host " [from $($u.FoundInEnv) -> to $($u.ExportEnv)]" -NoNewline -ForegroundColor Cyan
+        } else {
+            Write-Host "  Exporting: $secretKey" -NoNewline
+            Write-Host " [NEW to $($u.ExportEnv)]" -NoNewline -ForegroundColor Green
+        }
         
         if ($script:DryRunMode) {
             Write-Host " [DRYRUN]" -ForegroundColor Cyan
             $infResults += [PSCustomObject]@{
                 Username = $u.Username
                 SecretKey = $secretKey
-                Environment = $u.Domain
+                Environment = $u.ExportEnv
                 Success = $true
                 Error = $null
             }
@@ -359,7 +380,7 @@ if ($SkipInfisical) {
         $r = Set-InfisicalSecretCLI `
             -ServiceToken $ic.ServiceToken `
             -WorkspaceId $ic.WorkspaceId `
-            -Environment $u.EnvSlug `
+            -Environment $u.ExportEnvSlug `
             -SecretPath $ic.SecretPath `
             -SecretKey $secretKey `
             -SecretValue $u.Password `
@@ -368,7 +389,7 @@ if ($SkipInfisical) {
         $infResults += [PSCustomObject]@{
             Username = $u.Username
             SecretKey = $secretKey
-            Environment = $u.Domain
+            Environment = $u.ExportEnv
             Success = $r.Success
             Error = $r.Error
         }
@@ -411,6 +432,8 @@ foreach ($u in $usersWithPasswords) {
         Password = $u.Password
         PasswordSource = $u.PasswordSource
         FoundInEnv = $u.FoundInEnv
+        ExportEnv = $u.ExportEnv
+        SecretKey = $u.ExportSecretKey
         ZimbraChanged = $zim.PasswordChanged
         InfisicalExported = if ($inf) { $inf.Success } else { $false }
         Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
