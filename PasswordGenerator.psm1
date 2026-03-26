@@ -128,4 +128,30 @@ function New-BatchPasswords {
     return $results
 }
 
-Export-ModuleMember -Function @('New-SecurePassword', 'New-BatchPasswords', 'Test-PasswordStrength')
+function New-SinglePassword {
+    param(
+        [string]$Username,
+        [hashtable]$Config
+    )
+    
+    try {
+        $pwd = New-SecurePassword $Config
+        return [PSCustomObject]@{ 
+            Username = $Username
+            Password = $pwd.Password
+            Strength = $pwd.Strength
+            IsValid = $pwd.IsValid
+            Error = $null
+        }
+    } catch {
+        return [PSCustomObject]@{ 
+            Username = $Username
+            Password = $null
+            Strength = 0
+            IsValid = $false
+            Error = $_.Exception.Message
+        }
+    }
+}
+
+Export-ModuleMember -Function @('New-SecurePassword', 'New-BatchPasswords', 'New-SinglePassword', 'Test-PasswordStrength')

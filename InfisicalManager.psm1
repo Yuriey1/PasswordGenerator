@@ -17,6 +17,184 @@ function Test-InfisicalCLI {
         Write-Host "Infisical CLI not found" -ForegroundColor Red
         return $false
     }
+    
+    Write-Host "Infisical CLI not found" -ForegroundColor Red
+    return $false
+}
+
+function Test-InfisicalCLICore {
+    param([string]$CliPath = "infisical")
+    
+    try {
+        $version = & $CliPath --version 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            return $true
+        }
+    }
+    catch {}
+    
+    return $false
+}
+
+function Get-InfisicalEnvironments {
+    param(
+        [hashtable]$ConfigEnvironments  # @{ "name" = "slug" } from config
+    )
+    
+    $result = @{
+        Success = $false
+        Environments = @{}
+        Error = $null
+    }
+    
+    if ($ConfigEnvironments -and $ConfigEnvironments.Count -gt 0) {
+        $result.Environments = $ConfigEnvironments
+        $result.Success = $true
+        Write-Host "  Loaded $($result.Environments.Count) environments from config" -ForegroundColor Green
+    } else {
+        $result.Error = "No environments configured. Add 'Environments' hashtable to Infisical config section."
+        Write-Host "  ERROR: No environments in config" -ForegroundColor Red
+    }
+    
+    return [PSCustomObject]$result
+}
+
+function Find-InfisicalSecretInAllEnvironments {
+    param(
+        [string]$FIO,
+        [string]$Login,
+        [string]$ServiceToken,
+        [string]$WorkspaceId,
+        [hashtable]$EnvironmentMap,  # @{ "name" = "slug" }
+        [string]$SecretPath = "/",
+        [string]$ApiUrl,
+        [string]$CliPath = "infisical"
+    )
+    
+    $result = @{
+        Found = $false
+        SecretKey = $null
+        Value = $null
+        EnvironmentName = $null
+        EnvironmentSlug = $null
+        Error = $null
+    }
+    
+    # Format: "–§–∞–º–∏–ª–∏—è –ò–º—è –û—Ç—á–µ—Å—Ç–≤–æ (login)"
+    $secretName = "$FIO ($Login)"
+    
+    foreach ($envName in $EnvironmentMap.Keys) {
+        $envSlug = $EnvironmentMap[$envName]
+        
+        try {
+            $output = & $CliPath secrets get $secretName `
+                "--env=$envSlug" `
+                "--path=$SecretPath" `
+                "--projectId=$WorkspaceId" `
+                "--token=$ServiceToken" `
+                "--domain=$ApiUrl" 2>&1
+            
+            $outputStr = $output -join "`n"
+            
+            # Check if found
+            if ($outputStr -match "\*not found\*" -or $outputStr -match "not found") {
+                continue  # Try next environment
+            }
+            
+            # Parse value
+            $lines = $outputStr -split "`n"
+            foreach ($line in $lines) {
+                if ($line -match "‚îÇ\s*[^‚îÇ]+\s*‚îÇ\s*([^‚îÇ]+)\s*‚îÇ\s*[^‚îÇ]+\s*‚îÇ") {
+                    $value = $matches[1].Trim()
+                    if ($value -and $value -ne "*not found*" -and $value -ne "SECRET VALUE") {
+                        $result.Found = $true
+                        $result.SecretKey = $secretName
+                        $result.Value = $value
+                        $result.EnvironmentName = $envName
+                        $result.EnvironmentSlug = $envSlug
+                        return [PSCustomObject]$result
+                    }
+                }
+            }
+        }
+        catch {
+            # Continue to next environment
+            continue
+        }
+    }
+    
+    return [PSCustomObject]$result
+}
+
+function Get-InfisicalSecretByFioAndLogin {
+    param(
+        [string]$FIO,
+        [string]$Login,
+        [string]$ServiceToken,
+        [string]$WorkspaceId,
+        [string]$Environment = "dev",
+        [string]$SecretPath = "/",
+        [string]$ApiUrl,
+        [string]$CliPath = "infisical"
+    )
+    
+    $result = @{
+        Found = $false
+        SecretKey = $null
+        Value = $null
+        Error = $null
+    }
+    
+    # Format: "–§–∞–º–∏–ª–∏—è –ò–º—è –û—Ç—á–µ—Å—Ç–≤–æ (login)"
+    $secretName = "$FIO ($Login)"
+    
+    Write-Host "[DEBUG] Searching: '$secretName'" -ForegroundColor DarkGray
+    
+    try {
+        $output = & $CliPath secrets get $secretName `
+            "--env=$Environment" `
+            "--path=$SecretPath" `
+            "--projectId=$WorkspaceId" `
+            "--token=$ServiceToken" `
+            "--domain=$ApiUrl" 2>&1
+        
+        $outputStr = $output -join "`n"
+        Write-Host "[DEBUG] Output: $outputStr" -ForegroundColor DarkGray
+        
+        # Check for "not found" in output
+        if ($outputStr -match "\*not found\*" -or $outputStr -match "not found") {
+            Write-Host "[DEBUG] Secret NOT found" -ForegroundColor DarkGray
+            $result.Found = $false
+            return [PSCustomObject]$result
+        }
+        
+        # Parse table output
+        $lines = $outputStr -split "`n"
+        foreach ($line in $lines) {
+            # Match: ‚îÇ SECRET_NAME ‚îÇ SECRET_VALUE ‚îÇ SECRET_TYPE ‚îÇ
+            if ($line -match "‚îÇ\s*[^‚îÇ]+\s*‚îÇ\s*([^‚îÇ]+)\s*‚îÇ\s*[^‚îÇ]+\s*‚îÇ") {
+                $value = $matches[1].Trim()
+                Write-Host "[DEBUG] Parsed value: '$value'" -ForegroundColor DarkGray
+                
+                if ($value -and $value -ne "*not found*" -and $value -ne "SECRET VALUE") {
+                    $result.Found = $true
+                    $result.SecretKey = $secretName
+                    $result.Value = $value
+                    break
+                }
+            }
+        }
+        
+        if (-not $result.Found) {
+            Write-Host "[DEBUG] No valid value in output" -ForegroundColor DarkGray
+        }
+    }
+    catch {
+        $result.Error = $_.Exception.Message
+        Write-Host "[DEBUG] Error: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+    
+    return [PSCustomObject]$result
 }
 
 function Set-InfisicalSecretCLI {
@@ -37,29 +215,20 @@ function Set-InfisicalSecretCLI {
         Error = $null
     }
     
-    # œÓ‚ÂÍ‡ ApiUrl
     if ([string]::IsNullOrWhiteSpace($ApiUrl)) {
-        $result.Error = "ApiUrl is empty. Check config.psd1 has 'ApiUrl' parameter."
-        Write-Host "    ERROR: $result.Error" -ForegroundColor Red
+        $result.Error = "ApiUrl is empty"
         return [PSCustomObject]$result
     }
     
     try {
-        # Build arguments for 'secrets set'
-        $args = @(
-            "secrets", "set",
-            "$SecretKey=$SecretValue",
-            "--env=$Environment",
-            "--path=$SecretPath",
-            "--projectId=$WorkspaceId",
-            "--token=$ServiceToken",
-            "--domain=$ApiUrl"
-        )
+        Write-Host "    [CMD] infisical secrets set $SecretKey=*** --env=$Environment --projectId=$WorkspaceId --domain=$ApiUrl" -ForegroundColor DarkGray
         
-        Write-Host "    [CMD] infisical secrets set $SecretKey=***" -ForegroundColor DarkGray
-        Write-Host "    [DEBUG] --domain=$ApiUrl" -ForegroundColor DarkGray
-        
-        $output = & $CliPath @args 2>&1
+        $output = & $CliPath secrets set "$SecretKey=$SecretValue" `
+            "--env=$Environment" `
+            "--path=$SecretPath" `
+            "--projectId=$WorkspaceId" `
+            "--token=$ServiceToken" `
+            "--domain=$ApiUrl" 2>&1
         
         if ($LASTEXITCODE -eq 0) {
             $result.Success = $true
@@ -79,7 +248,7 @@ function Import-BatchSecretsCLI {
     param(
         [string]$ServiceToken,
         [string]$WorkspaceId,
-        [string]$Environment = "prod",
+        [string]$Environment = "dev",
         [string]$SecretPath = "/",
         [array]$Secrets,
         [string]$ApiUrl,
@@ -93,20 +262,23 @@ function Import-BatchSecretsCLI {
     Write-Host "Importing $($Secrets.Count) secrets via CLI..." -ForegroundColor Cyan
     Write-Host "[DEBUG] ApiUrl: $ApiUrl" -ForegroundColor DarkGray
     
-
-
     foreach ($sec in $Secrets) {
+        $name = $sec.SamAccountName
+        if (-not $name) { $name = $sec.Email }
+        
+        # Extract login from email
+        $loginOnly = $name
+        if ($name -match "^([^@]+)@") {
+            $loginOnly = $matches[1]
+        }
+        
         $fio = $sec.Username
-        $login = $sec.SamAccountName
-        if (-not $login) { $login = $fio }
-    
-        # «‡ÏÂÌˇÂÏ ÔÓ·ÂÎ˚ Ì‡ ÔÓ‰˜∏ÍË‚‡ÌËˇ
-        #$fioClean = $fio -replace '\s+', '_'
-        #$key = "$fioClean ($login)"
-        $key = "$fio ($login)"
-    
+        
+        # Format: "–§–∞–º–∏–ª–∏—è –ò–º—è –û—Ç—á–µ—Å—Ç–≤–æ (login)"
+        $key = "$fio ($loginOnly)"
+        
         Write-Host "  Setting: $key ... " -NoNewline
-
+        
         $r = Set-InfisicalSecretCLI `
             -ServiceToken $ServiceToken `
             -WorkspaceId $WorkspaceId `
@@ -147,6 +319,10 @@ function Import-BatchSecretsCLI {
 
 Export-ModuleMember -Function @(
     'Test-InfisicalCLI',
+    'Test-InfisicalCLICore',
+    'Get-InfisicalEnvironments',
+    'Find-InfisicalSecretInAllEnvironments',
+    'Get-InfisicalSecretByFioAndLogin',
     'Set-InfisicalSecretCLI',
     'Import-BatchSecretsCLI'
 )

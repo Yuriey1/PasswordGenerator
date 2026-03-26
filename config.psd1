@@ -20,10 +20,21 @@
     
     Infisical = @{
         ApiUrl = "https://infisical.krasintegra.ru"
-        ServiceToken = "st.4b9dd06c-79a9-4480-b6b9-14f15f6f662f.3e91acd752976bec15f4a39d3b41dd00.42826d96a2482f7b9c7207602dfc3b2e"
+        ServiceToken = "st.210ff6ef-7da0-4697-bfc1-3a90aa7c7186.f2c16e938dd29a1cf81e0df7ab981598.9dfac17a02ad9f5c958b2b2452db9311"
         WorkspaceId = "9db52232-b84f-4905-9478-6b640150db46"
         Environment = "prod"
         SecretPath = "/"
+        # Маппинг environment name -> slug
+        Environments = @{
+            "AD/gmkzoloto.ru" = "prod"
+            "krasintegra.ru" = "krasintegra-ru"
+            "ag.gold" = "ag-gold"
+            "kc124.ru" = "kc124-ru"
+            "krasprom.com" = "krasprom-com"
+            "sibzoloto24.ru" = "sibzoloto-ru"
+            "vagon-k.ru" = "vagon-k-ru"
+            "tkkrasline.ru" = "tkkrasline-ru"
+        }
     }
     
     IO = @{

@@ -42,7 +42,6 @@ function Initialize-ZimbraConnection {
     }
     
     try {
-        # Force TLS 1.2
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         
         $response = Invoke-WebRequest -Uri "$script:ZimbraUrl/service/admin/soap" `
@@ -50,8 +49,7 @@ function Initialize-ZimbraConnection {
             -ContentType "application/soap+xml; charset=utf-8" `
             -Body $soapXml `
             -UseBasicParsing `
-            -SkipCertificateCheck `
-            -ErrorAction SilentlyContinue
+            -SkipCertificateCheck
         
         if ($DebugMode) {
             Write-Host "`n[DEBUG] Response Status: $($response.StatusCode)" -ForegroundColor DarkGray
@@ -61,7 +59,6 @@ function Initialize-ZimbraConnection {
         
         [xml]$xml = $response.Content
         
-        # Extract authToken from response
         $ns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
         $ns.AddNamespace("soap", "http://www.w3.org/2003/05/soap-envelope")
         $ns.AddNamespace("zimbra", "urn:zimbraAdmin")
@@ -79,33 +76,7 @@ function Initialize-ZimbraConnection {
     }
     catch {
         Write-Host " ERROR" -ForegroundColor Red
-        
-        # Try to get response body for error details
-        $errorMsg = $_.Exception.Message
-        
-        if ($_.Exception.Response) {
-            try {
-                $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
-                $errorBody = $reader.ReadToEnd()
-                $reader.Close()
-                
-                Write-Host "  Status: $($_.Exception.Response.StatusCode.value__)" -ForegroundColor Red
-                Write-Host "  Response Body:" -ForegroundColor Red
-                Write-Host $errorBody -ForegroundColor DarkGray
-                
-                # Try to extract SOAP fault
-                if ($errorBody -match '<soap:Text[^>]*>([^<]+)</soap:Text>') {
-                    $errorMsg = $matches[1]
-                }
-                if ($errorBody -match '<Code>([^<]+)</Code>') {
-                    $errorMsg = $matches[1]
-                }
-            } catch {
-                Write-Host "  Could not read response body" -ForegroundColor Red
-            }
-        }
-        
-        Write-Host "  Error: $errorMsg" -ForegroundColor Red
+        Write-Host "  $($_.Exception.Message)" -ForegroundColor Red
         return $false
     }
 }
@@ -119,7 +90,6 @@ function Get-ZimbraAccount {
         throw "Not authenticated. Call Initialize-ZimbraConnection first."
     }
     
-    # SOAP GetAccountRequest
     $soapXml = @"
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
   <soap:Header>
@@ -165,7 +135,6 @@ function Get-ZimbraAccount {
         return @{ Found = $false }
     }
     catch {
-        # Check if account not found
         if ($_.Exception.Message -match "account.NO_SUCH_ACCOUNT" -or 
             $_.Exception.Message -match "no such account") {
             return @{ Found = $false }
@@ -178,7 +147,8 @@ function Set-ZimbraPassword {
     param(
         [string]$AccountEmail,
         [string]$NewPassword,
-        [switch]$WhatIf
+        [switch]$WhatIf,
+        [switch]$DebugMode
     )
     
     if (-not $script:AuthToken) {
@@ -206,7 +176,6 @@ function Set-ZimbraPassword {
         }
     }
     
-    # SOAP ModifyAccountRequest
     $soapXml = @"
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
   <soap:Header>
@@ -215,50 +184,132 @@ function Set-ZimbraPassword {
     </context>
   </soap:Header>
   <soap:Body>
-    <ModifyAccountRequest xmlns="urn:zimbraAdmin" id="$accountId">
-      <a n="password">$NewPassword</a>
-    </ModifyAccountRequest>
+    <SetPasswordRequest xmlns="urn:zimbraAdmin" id="$accountId" newPassword="$NewPassword"/>
   </soap:Body>
 </soap:Envelope>
 "@
     
+    if ($DebugMode) {
+        Write-Host ""
+        Write-Host "    [DEBUG] Account: $AccountEmail (id=$accountId)" -ForegroundColor DarkGray
+        Write-Host "    [DEBUG] Using SetPasswordRequest API" -ForegroundColor DarkGray
+    }
+    
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        
-        $response = Invoke-WebRequest -Uri "$script:ZimbraUrl/service/admin/soap" `
-            -Method POST `
-            -ContentType "application/soap+xml; charset=utf-8" `
-            -Body $soapXml `
-            -UseBasicParsing `
-            -SkipCertificateCheck `
-            -ErrorAction Stop
-        
-        return @{
-            Success = $true
-            AccountId = $accountId
-            Error = $null
-        }
-    }
-    catch {
-        $errorMsg = $_.Exception.Message
-        
-        # Try to extract SOAP fault
+
+        # Use try-catch inside to capture response even on error
+        $response = $null
+        $errorBody = $null
+
         try {
-            if ($_.Exception.Response) {
-                $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
-                $errorXml = $reader.ReadToEnd()
+            $response = Invoke-WebRequest -Uri "$script:ZimbraUrl/service/admin/soap" `
+                -Method POST `
+                -ContentType "application/soap+xml; charset=utf-8" `
+                -Body $soapXml `
+                -UseBasicParsing `
+                -SkipCertificateCheck
+        }
+        catch {
+            # PowerShell 7+ throws HttpResponseException, older versions throw WebException
+            $ex = $_.Exception
+            if ($ex.Response) {
+                # For HttpResponseException (PowerShell 7+)
+                $errorBody = $ex.Response.Content
+            }
+            elseif ($ex -is [System.Net.WebException] -and $ex.Response) {
+                # For WebException (PowerShell 5.1)
+                $reader = New-Object System.IO.StreamReader($ex.Response.GetResponseStream())
+                $errorBody = $reader.ReadToEnd()
                 $reader.Close()
+            }
+            else {
+                $errorBody = $ex.Message
+            }
+            $response = $null
+        }
+        
+        # Show response or error body
+        if ($DebugMode) {
+            if ($response) {
+                Write-Host "    [DEBUG] HTTP Status: $($response.StatusCode)" -ForegroundColor DarkGray
+                Write-Host "    [DEBUG] Response: $($response.Content)" -ForegroundColor DarkGray
+            }
+            if ($errorBody) {
+                Write-Host "    [DEBUG] Error Response: $errorBody" -ForegroundColor DarkGray
+            }
+        }
+        
+        # Parse error body for SOAP fault
+        if ($errorBody) {
+            $faultCode = ""
+            $faultText = ""
+            $faultDetail = ""
+            
+            if ($errorBody -match '<soap:Fault') {
+                if ($errorBody -match '<soap:Value[^>]*>([^<]+)</soap:Value>') { $faultCode = $matches[1] }
+                if ($errorBody -match '<soap:Text[^>]*>([^<]+)</soap:Text>') { $faultText = $matches[1] }
+                if ($errorBody -match '<a n="message">([^<]+)</a>') { $faultDetail = $matches[1] }
                 
-                if ($errorXml -match '<soap:Text[^>]*>([^<]+)</soap:Text>') {
-                    $errorMsg = $matches[1]
+                $errorDetail = "SOAP Fault: $faultCode"
+                if ($faultText) { $errorDetail += " - $faultText" }
+                if ($faultDetail) { $errorDetail += " ($faultDetail)" }
+                
+                return @{
+                    Success = $false
+                    AccountId = $accountId
+                    Error = $errorDetail
                 }
             }
-        } catch {}
+            
+            return @{
+                Success = $false
+                AccountId = $accountId
+                Error = "HTTP Error with unknown response"
+            }
+        }
+        
+        # Check response
+        if ($response) {
+            # Check for SOAP fault in response
+            if ($response.Content -match '<soap:Fault') {
+                $faultCode = ""
+                $faultText = ""
+                $faultDetail = ""
+                
+                if ($response.Content -match '<soap:Value[^>]*>([^<]+)</soap:Value>') { $faultCode = $matches[1] }
+                if ($response.Content -match '<soap:Text[^>]*>([^<]+)</soap:Text>') { $faultText = $matches[1] }
+                if ($response.Content -match '<a n="message">([^<]+)</a>') { $faultDetail = $matches[1] }
+                
+                $errorDetail = "SOAP Fault: $faultCode"
+                if ($faultText) { $errorDetail += " - $faultText" }
+                if ($faultDetail) { $errorDetail += " ($faultDetail)" }
+                
+                return @{
+                    Success = $false
+                    AccountId = $accountId
+                    Error = $errorDetail
+                }
+            }
+            
+            return @{
+                Success = $true
+                AccountId = $accountId
+                Error = $null
+            }
+        }
         
         return @{
             Success = $false
             AccountId = $accountId
-            Error = $errorMsg
+            Error = "No response"
+        }
+    }
+    catch {
+        return @{
+            Success = $false
+            AccountId = $accountId
+            Error = $_.Exception.Message
         }
     }
 }
@@ -266,7 +317,8 @@ function Set-ZimbraPassword {
 function Reset-BatchZimbraPasswords {
     param(
         [array]$UsersWithPasswords,
-        [switch]$WhatIf
+        [switch]$WhatIf,
+        [switch]$DebugMode
     )
     
     $results = @()
@@ -289,7 +341,7 @@ function Reset-BatchZimbraPasswords {
         
         Write-Host "  Setting password for $email ... " -NoNewline
         
-        $r = Set-ZimbraPassword -AccountEmail $email -NewPassword $u.Password -WhatIf:$WhatIf
+        $r = Set-ZimbraPassword -AccountEmail $email -NewPassword $u.Password -WhatIf:$WhatIf -DebugMode:$DebugMode
         
         if ($r.Success) {
             if ($WhatIf) {

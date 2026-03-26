@@ -115,48 +115,12 @@ try {
 catch { Write-Log "CSV error: $_" -Level Error; exit 1 }
 
 # ============================================
-# Confirm
+# Get Infisical Environments (mapping name -> slug)
 # ============================================
-if ($config.Security.RequireConfirmation -and -not $Force -and -not $config.Security.DryRun) {
-    Write-Host "`nACTIONS:`n  1. Generate passwords for $($normalized.Count) users`n  2. Reset AD passwords`n  3. Export to Infisical`n" -ForegroundColor Yellow
-    if ($SkipAD) { Write-Host "  [SKIP] AD reset" -ForegroundColor Yellow }
-    if ($SkipInfisical) { Write-Host "  [SKIP] Infisical" -ForegroundColor Yellow }
-    if ($DryRun) { Write-Host "  [DRYRUN] No changes" -ForegroundColor Cyan }
-    if ((Read-Host "Continue? (Y/N)") -notmatch "^[Yy]$") { Write-Log "Cancelled" -Level Warning; exit 0 }
-}
-
-# ============================================
-# Generate Passwords
-# ============================================
-Write-Section "Generating Passwords"
- $pwResults = New-BatchPasswords -Users $normalized -Config $config.PasswordGenerator
- $validPw = @($pwResults | Where-Object { $_.IsValid })
-Write-Log "Generated: $($pwResults.Count), Valid: $($validPw.Count)" -Level Success
-
-# ============================================
-# AD Reset
-# ============================================
- $adResults = @()
-if (-not $SkipAD) {
-    Write-Section "Resetting AD Passwords"
-    try { Test-ADModuleAvailable | Out-Null; $adConn = Initialize-ADConnection -DomainController $config.AD.DomainController } catch { Write-Log "AD error: $_" -Level Error; exit 1 }
-    $adResults = Reset-BatchADPasswords -UsersWithPasswords $validPw -ADConfig $config.AD -SecurityConfig $config.Security -WhatIf:$config.Security.DryRun
-    $s = ($adResults | Where-Object { $_.PasswordChanged }).Count
-    Write-Log "AD: $s passwords changed" -Level $(if ($s -eq $validPw.Count) { "Success" } else { "Warning" })
-} else {
-    Write-Section "AD Reset - SKIPPED"
-    foreach ($p in $validPw) {
-        $adResults += [PSCustomObject]@{ Username = $p.Username; SamAccountName = $p.Username; Email = $p.Email; Found = $true; PasswordChanged = $true; Warnings = @(); Errors = @(); Skipped = $false }
-    }
-}
-
-# ============================================
-# Export to Infisical
-# ============================================
- $infResults = @()
+$envMap = @{}
 
 if (-not $SkipInfisical) {
-    Write-Section "Exporting to Infisical"
+    Write-Section "Fetching Infisical Environments"
     
     $ic = $config.Infisical
     
@@ -169,31 +133,235 @@ if (-not $SkipInfisical) {
         exit 1
     }
     
-    # Prepare secrets
-    $secrets = @()
-    foreach ($p in $validPw) {
-        $ad = $adResults | Where-Object { $_.Username -eq $p.Username } | Select-Object -First 1
-        if ($ad -and ($ad.PasswordChanged -or $SkipAD)) {
-            $secrets += [PSCustomObject]@{
-                Username = $p.Username
-                SamAccountName = $ad.SamAccountName
-                Email = $p.Email
-                Password = $p.Password
-            }
+    # Get environments
+    $envResult = Get-InfisicalEnvironments `
+        -ServiceToken $ic.ServiceToken `
+        -WorkspaceId $ic.WorkspaceId `
+        -ApiUrl $ic.ApiUrl
+    
+    if (-not $envResult.Success) {
+        Write-Log "Failed to get environments: $($envResult.Error)" -Level Error
+        exit 1
+    }
+    
+    $envMap = $envResult.Environments
+    
+    Write-Host ""
+    Write-Host "  Environment mapping:" -ForegroundColor Cyan
+    foreach ($key in $envMap.Keys) {
+        Write-Host "    '$key' -> '$($envMap[$key])'" -ForegroundColor Gray
+    }
+}
+
+# ============================================
+# Process Users: Check existing passwords and generate new ones
+# ============================================
+Write-Section "Processing Passwords"
+
+$usersWithPasswords = @()
+$reusedCount = 0
+$generatedCount = 0
+$skippedCount = 0
+
+foreach ($u in $normalized) {
+    $email = $u.Email
+    $fio = $u.Username
+    
+    # Extract login from email
+    $login = $null
+    $domain = $null
+    if ($email -match "^([^@]+)@(.+)$") {
+        $login = $matches[1]
+        $domain = $matches[2]
+    }
+    
+    if (-not $login) {
+        Write-Host "  [SKIP] $($fio): no email or cannot extract login" -ForegroundColor Yellow
+        $skippedCount++
+        continue
+    }
+    
+    # Find environment slug for this domain
+    $envSlug = $null
+    if ($envMap.Count -gt 0) {
+        $envSlug = $envMap[$domain]
+        Write-Host "  [DEBUG] Domain '$domain' -> slug '$envSlug'" -ForegroundColor DarkGray
+    }
+    
+    if (-not $envSlug -and -not $SkipInfisical) {
+        Write-Host "  [SKIP] $($fio): environment not found for domain '$domain'" -ForegroundColor Yellow
+        Write-Host "  [DEBUG] Available environments: $($envMap.Keys -join ', ')" -ForegroundColor DarkGray
+        $skippedCount++
+        continue
+    }
+    
+    # Check if password already exists in Infisical (READ operation - always execute)
+    $existingPassword = $null
+    $passwordSource = "generated"
+    
+    if (-not $SkipInfisical) {
+        $existingSecret = Find-InfisicalSecretInAllEnvironments `
+            -FIO $fio `
+            -Login $login `
+            -ServiceToken $ic.ServiceToken `
+            -WorkspaceId $ic.WorkspaceId `
+            -EnvironmentMap $envMap `
+            -SecretPath $ic.SecretPath `
+            -ApiUrl $ic.ApiUrl
+        
+        if ($existingSecret.Found) {
+            $existingPassword = $existingSecret.Value
+            $passwordSource = "reused from '$($existingSecret.EnvironmentName)'"
+            $reusedCount++
+            Write-Host "  [REUSE] $fio ($login@$domain) - found in '$($existingSecret.EnvironmentName)'" -ForegroundColor Cyan
         }
     }
     
-    Write-Log "Exporting $($secrets.Count) secrets" -Level Info
+    # Generate new password if not found
+    if (-not $existingPassword) {
+        $pwResult = New-SinglePassword -Username $fio -Config $config.PasswordGenerator
+        if ($pwResult.IsValid) {
+            $existingPassword = $pwResult.Password
+            $generatedCount++
+            Write-Host "  [NEW] $fio ($login@$domain)" -ForegroundColor Green
+        } else {
+            Write-Host "  [ERROR] $fio: password generation failed" -ForegroundColor Red
+            $skippedCount++
+            continue
+        }
+    }
     
-    if ($secrets.Count -gt 0) {
-        $infResults = Import-BatchSecretsCLI `
+    $usersWithPasswords += [PSCustomObject]@{
+        Username = $fio
+        Email = $email
+        Login = $login
+        Domain = $domain
+        EnvSlug = $envSlug
+        Password = $existingPassword
+        PasswordSource = $passwordSource
+    }
+}
+
+Write-Log "Users processed: $($usersWithPasswords.Count) (reused: $reusedCount, generated: $generatedCount, skipped: $skippedCount)" -Level $(if ($skippedCount -gt 0) { "Warning" } else { "Success" })
+
+if ($usersWithPasswords.Count -eq 0) {
+    Write-Log "No users to process" -Level Warning
+    exit 0
+}
+
+# ============================================
+# Confirm
+# ============================================
+if ($config.Security.RequireConfirmation -and -not $Force -and -not $config.Security.DryRun) {
+    Write-Host "`nACTIONS:`n  1. Processed $($usersWithPasswords.Count) users`n  2. Reset AD passwords`n  3. Export to Infisical`n" -ForegroundColor Yellow
+    if ($SkipAD) { Write-Host "  [SKIP] AD reset" -ForegroundColor Yellow }
+    if ($SkipInfisical) { Write-Host "  [SKIP] Infisical" -ForegroundColor Yellow }
+    if ($DryRun) { Write-Host "  [DRYRUN] No changes" -ForegroundColor Cyan }
+    if ((Read-Host "Continue? (Y/N)") -notmatch "^[Yy]$") { Write-Log "Cancelled" -Level Warning; exit 0 }
+}
+
+# ============================================
+# AD Reset
+# ============================================
+ $adResults = @()
+if (-not $SkipAD) {
+    Write-Section "Resetting AD Passwords"
+    try { Test-ADModuleAvailable | Out-Null; $adConn = Initialize-ADConnection -DomainController $config.AD.DomainController } catch { Write-Log "AD error: $_" -Level Error; exit 1 }
+    
+    # Prepare users for AD reset
+    $adUsers = @()
+    foreach ($u in $usersWithPasswords) {
+        $adUsers += [PSCustomObject]@{
+            Username = $u.Username
+            Email = $u.Email
+            Password = $u.Password
+        }
+    }
+    
+    $adResults = Reset-BatchADPasswords -UsersWithPasswords $adUsers -ADConfig $config.AD -SecurityConfig $config.Security -WhatIf:$config.Security.DryRun
+    $s = ($adResults | Where-Object { $_.PasswordChanged }).Count
+    Write-Log "AD: $s passwords changed" -Level $(if ($s -eq $usersWithPasswords.Count) { "Success" } else { "Warning" })
+} else {
+    Write-Section "AD Reset - SKIPPED"
+    foreach ($u in $usersWithPasswords) {
+        $adResults += [PSCustomObject]@{ Username = $u.Username; SamAccountName = $u.Login; Email = $u.Email; Found = $true; PasswordChanged = $true; Warnings = @(); Errors = @(); Skipped = $false }
+    }
+}
+
+# ============================================
+# Export to Infisical
+# ============================================
+ $infResults = @()
+
+if (-not $SkipInfisical) {
+    Write-Section "Exporting to Infisical"
+    
+    $ic = $config.Infisical
+    $successCount = 0
+    $errorCount = 0
+    
+    foreach ($u in $usersWithPasswords) {
+        $ad = $adResults | Where-Object { $_.Username -eq $u.Username } | Select-Object -First 1
+        
+        if (-not $ad -or (-not $ad.PasswordChanged -and -not $SkipAD)) {
+            Write-Host "  [SKIP] $($u.Username): AD password not changed" -ForegroundColor DarkGray
+            continue
+        }
+        
+        # Secret key format: "Фамилия Имя Отчество (login)"
+        $secretKey = "$($u.Username) ($($u.Login))"
+        
+        Write-Host "  Exporting: $secretKey" -NoNewline
+        Write-Host " [env=$($u.Domain), slug=$($u.EnvSlug)]" -NoNewline -ForegroundColor DarkGray
+        
+        if ($config.Security.DryRun) {
+            Write-Host " [DRYRUN]" -ForegroundColor Cyan
+            $infResults += [PSCustomObject]@{
+                Username = $u.Username
+                SecretKey = $secretKey
+                Environment = $u.Domain
+                Success = $true
+                Error = $null
+            }
+            $successCount++
+            continue
+        }
+        
+        Write-Host " ..." -NoNewline
+        
+        $r = Set-InfisicalSecretCLI `
             -ServiceToken $ic.ServiceToken `
             -WorkspaceId $ic.WorkspaceId `
-            -Environment $ic.Environment `
+            -Environment $u.EnvSlug `
             -SecretPath $ic.SecretPath `
-            -Secrets $secrets `
+            -SecretKey $secretKey `
+            -SecretValue $u.Password `
             -ApiUrl $ic.ApiUrl
+        
+        $infResults += [PSCustomObject]@{
+            Username = $u.Username
+            SecretKey = $secretKey
+            Environment = $u.Domain
+            Success = $r.Success
+            Error = $r.Error
+        }
+        
+        if ($r.Success) {
+            Write-Host " OK" -ForegroundColor Green
+            $successCount++
+        } else {
+            Write-Host " ERROR" -ForegroundColor Red
+            if ($r.Error) {
+                $errLines = $r.Error -split "`n" | Select-Object -First 3
+                foreach ($line in $errLines) {
+                    if ($line) { Write-Host "    $line" -ForegroundColor DarkGray }
+                }
+            }
+            $errorCount++
+        }
     }
+    
+    Write-Log "Infisical: $successCount exported, $errorCount errors" -Level $(if ($errorCount -eq 0) { "Success" } else { "Warning" })
 } else {
     Write-Section "Infisical - SKIPPED"
 }
@@ -207,9 +375,17 @@ if ($config.IO.SaveLocalBackup) {
     if (-not (Test-Path $bp)) { New-Item -ItemType Directory -Path $bp -Force | Out-Null }
     $bf = Join-Path $bp "passwords-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
     $bd = @()
-    foreach ($p in $validPw) {
-        $ad = $adResults | Where-Object { $_.Username -eq $p.Username } | Select-Object -First 1
-        $bd += [PSCustomObject]@{ Username = $p.Username; SamAccountName = $ad.SamAccountName; Email = $p.Email; Password = $p.Password; Strength = $p.Strength; Timestamp = $p.Timestamp }
+    foreach ($u in $usersWithPasswords) {
+        $ad = $adResults | Where-Object { $_.Username -eq $u.Username } | Select-Object -First 1
+        $bd += [PSCustomObject]@{ 
+            Username = $u.Username
+            Login = $u.Login
+            Email = $u.Email
+            Domain = $u.Domain
+            Password = $u.Password
+            PasswordSource = $u.PasswordSource
+            Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        }
     }
     $bd | Export-Csv -Path $bf -NoTypeInformation -Encoding UTF8 -Delimiter ";"
     Write-Log "Backup: $bf" -Level Success
@@ -221,17 +397,18 @@ if ($config.IO.SaveLocalBackup) {
 Write-Section "Report"
  $rp = ".\report-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
  $report = @()
-foreach ($u in $normalized) {
-    $pw = $pwResults | Where-Object { $_.Username -eq $u.Username } | Select-Object -First 1
+foreach ($u in $usersWithPasswords) {
     $ad = $adResults | Where-Object { $_.Username -eq $u.Username } | Select-Object -First 1
     $inf = $infResults | Where-Object { $_.Username -eq $u.Username } | Select-Object -First 1
     $report += [PSCustomObject]@{
         Username = $u.Username
-        SamAccountName = $ad.SamAccountName
+        Login = $u.Login
         Email = $u.Email
-        PasswordGenerated = $pw.IsValid
+        Domain = $u.Domain
+        PasswordSource = $u.PasswordSource
         ADPasswordChanged = $ad.PasswordChanged
-        InfisicalExported = $inf.Success
+        InfisicalExported = if ($inf) { $inf.Success } else { $false }
+        Environment = $u.Domain
         Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     }
 }
@@ -243,6 +420,11 @@ Write-Log "Report: $rp" -Level Success
 # ============================================
 Write-Header "SUMMARY"
  $d = (Get-Date) - $script:StartTime
-Write-Host "Time: $($d.ToString('mm\:ss'))`nUsers: $($normalized.Count)`nPasswords: $($validPw.Count)" -ForegroundColor Cyan
+Write-Host "Time: $($d.ToString('mm\:ss'))" -ForegroundColor Cyan
+Write-Host "Users in CSV: $($normalized.Count)" -ForegroundColor Cyan
+Write-Host "Users processed: $($usersWithPasswords.Count)" -ForegroundColor Cyan
+Write-Host "  - Reused passwords: $reusedCount" -ForegroundColor Cyan
+Write-Host "  - Generated passwords: $generatedCount" -ForegroundColor Cyan
+Write-Host "  - Skipped: $skippedCount" -ForegroundColor $(if ($skippedCount -gt 0) { "Yellow" } else { "Cyan" })
 if ($config.Security.DryRun) { Write-Host "`nDRYRUN - NO CHANGES MADE" -ForegroundColor Yellow }
 Write-Log "Completed" -Level Success

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Zimbra Password Reset Tool with Infisical Export
+    Zimbra Password Reset Tool with Infisical Integration
 #>
 [CmdletBinding()]
 param(
@@ -11,9 +11,12 @@ param(
     [switch]$SkipZimbra,
     [switch]$SkipInfisical,
     [switch]$Force,
-    [switch]$GenerateOnly,
     [switch]$DebugMode
 )
+
+# Set console encoding to UTF-8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 $ErrorActionPreference = "Stop"
 $script:StartTime = Get-Date
@@ -25,9 +28,7 @@ function Write-Log {
     $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $prefix = @{ Info = "[INFO]"; Warning = "[WARN]"; Error = "[ERROR]"; Success = "[OK]" }[$Level]
     $color = @{ Info = "White"; Warning = "Yellow"; Error = "Red"; Success = "Green" }[$Level]
-    $msg = "$ts $prefix $Message"
-    Write-Host $msg -ForegroundColor $color
-    if ($config.Logging.LogFilePath) { Add-Content -Path $config.Logging.LogFilePath -Value $msg -Encoding UTF8 }
+    Write-Host "$ts $prefix $Message" -ForegroundColor $color
 }
 
 function Write-Header { param([string]$Text) Write-Host "`n$("=" * 60)`n  $Text`n$("=" * 60)`n" -ForegroundColor Cyan }
@@ -38,32 +39,26 @@ function Write-Section { param([string]$Text) Write-Host "`n--- $Text ---" -Fore
 # ============================================
 Write-Header "Zimbra Password Reset Tool"
 
-# Load main config
-Write-Log "Loading main configuration..."
-$mainConfigPath = $ConfigPath
-if (-not [System.IO.Path]::IsPathRooted($mainConfigPath)) {
-    $mainConfigPath = Join-Path $script:ScriptDir $mainConfigPath
+Write-Log "Loading configuration..."
+$configPathFull = $ConfigPath
+if (-not [System.IO.Path]::IsPathRooted($configPathFull)) {
+    $configPathFull = Join-Path $script:ScriptDir $configPathFull
 }
-if (-not (Test-Path $mainConfigPath)) { Write-Log "Config not found: $mainConfigPath" -Level Error; exit 1 }
-try { $config = Import-PowerShellDataFile -Path $mainConfigPath; Write-Log "Main config loaded" -Level Success } catch { Write-Log "Config error: $_" -Level Error; exit 1 }
+if (-not (Test-Path $configPathFull)) { Write-Log "Config not found: $configPathFull" -Level Error; exit 1 }
+$config = Import-PowerShellDataFile -Path $configPathFull
+Write-Log "Main config loaded" -Level Success
 
-# Load Zimbra config
-Write-Log "Loading Zimbra configuration..."
-$zimbraConfigPath = $ZimbraConfigPath
-if (-not [System.IO.Path]::IsPathRooted($zimbraConfigPath)) {
-    $zimbraConfigPath = Join-Path $script:ScriptDir $zimbraConfigPath
+$zimbraConfigPathFull = $ZimbraConfigPath
+if (-not [System.IO.Path]::IsPathRooted($zimbraConfigPathFull)) {
+    $zimbraConfigPathFull = Join-Path $script:ScriptDir $zimbraConfigPathFull
 }
-if (-not (Test-Path $zimbraConfigPath)) { Write-Log "Zimbra config not found: $zimbraConfigPath" -Level Error; exit 1 }
-try { $zimbraConfig = Import-PowerShellDataFile -Path $zimbraConfigPath; Write-Log "Zimbra config loaded" -Level Success } catch { Write-Log "Zimbra config error: $_" -Level Error; exit 1 }
-
-# Merge configs
+if (-not (Test-Path $zimbraConfigPathFull)) { Write-Log "Zimbra config not found" -Level Error; exit 1 }
+$zimbraConfig = Import-PowerShellDataFile -Path $zimbraConfigPathFull
 $config.Zimbra = $zimbraConfig.Zimbra
+Write-Log "Zimbra config loaded" -Level Success
 
-# Set DryRun mode
 if ($DryRun) { $script:DryRunMode = $true }
-
 if ($InputCsv) { $config.IO.InputCsvPath = $InputCsv }
-if ($GenerateOnly) { $SkipZimbra = $true; $SkipInfisical = $true }
 
 # ============================================
 # Load Modules
@@ -71,7 +66,8 @@ if ($GenerateOnly) { $SkipZimbra = $true; $SkipInfisical = $true }
 Write-Section "Loading Modules"
 foreach ($m in @("PasswordGenerator.psm1", "ZimbraManager.psm1", "InfisicalManager.psm1")) {
     $p = Join-Path $script:ScriptDir $m
-    if (Test-Path $p) { Import-Module $p -Force; Write-Log "$m loaded" -Level Success } else { Write-Log "$m not found" -Level Error; exit 1 }
+    if (Test-Path $p) { Import-Module $p -Force; Write-Log "$m loaded" -Level Success } 
+    else { Write-Log "$m not found at $p" -Level Error; exit 1 }
 }
 
 # ============================================
@@ -80,85 +76,190 @@ foreach ($m in @("PasswordGenerator.psm1", "ZimbraManager.psm1", "InfisicalManag
 Write-Section "Loading Users"
 
 $csvPath = $config.IO.InputCsvPath
-
 if (-not [System.IO.Path]::IsPathRooted($csvPath)) {
     $csvPath = Join-Path $script:ScriptDir $csvPath
 }
 
+if (-not (Test-Path $csvPath)) { Write-Log "CSV file not found: $csvPath" -Level Error; exit 1 }
 Write-Log "CSV path: $csvPath" -Level Info
 
-if (-not (Test-Path $csvPath)) {
-    Write-Log "CSV file not found: $csvPath" -Level Error
-    exit 1
-}
-
-$encName = $config.IO.CsvEncoding
-if (-not $encName) { $encName = "UTF8" }
+$encName = if ($config.IO.CsvEncoding) { $config.IO.CsvEncoding } else { "UTF8" }
 $encoding = switch ($encName) {
     "Windows1251" { [System.Text.Encoding]::GetEncoding("windows-1251") }
-    "UTF8" { [System.Text.Encoding]::UTF8 }
     default { [System.Text.Encoding]::UTF8 }
 }
-Write-Log "CSV encoding: $encName" -Level Info
 
-try {
-    $csvContent = [System.IO.File]::ReadAllText($csvPath, $encoding)
-    $csvUsers = $csvContent | ConvertFrom-Csv -Delimiter ";"
-    Write-Log "Loaded $($csvUsers.Count) rows from CSV" -Level Info
+$csvContent = [System.IO.File]::ReadAllText($csvPath, $encoding)
+$csvUsers = $csvContent | ConvertFrom-Csv -Delimiter ";"
+Write-Log "Loaded $($csvUsers.Count) rows from CSV" -Level Info
+
+$script:NormalizedUsers = @()
+foreach ($u in $csvUsers) {
+    $firstCol = $u.PSObject.Properties.Name[0]
+    $username = $u.$firstCol
     
-    if ($csvUsers.Count -gt 0) {
-        $cols = $csvUsers[0].PSObject.Properties.Name
-        Write-Host "  Columns: $($cols -join ', ')" -ForegroundColor Gray
-    }
+    $email = $null
+    $emailCol = $u.PSObject.Properties.Name | Where-Object { $_ -match "^email$" }
+    if ($emailCol) { $email = $u.$emailCol }
     
-    $script:NormalizedUsers = @()
-    foreach ($u in $csvUsers) {
-        $firstCol = $u.PSObject.Properties.Name[0]
-        $username = $u.$firstCol
-        
-        $email = $null
-        $emailCol = $u.PSObject.Properties.Name | Where-Object { $_ -match "^email$" }
-        if ($emailCol) {
-            $email = $u.$emailCol
-        }
-        
-        if ($username -and $username.Trim()) {
-            $script:NormalizedUsers += [PSCustomObject]@{
-                Username = $username.Trim()
-                Email = if ($email) { $email.Trim().ToLower() } else { $null }
-            }
+    if ($username -and $username.Trim()) {
+        $script:NormalizedUsers += [PSCustomObject]@{
+            Username = $username.Trim()
+            Email = if ($email) { $email.Trim().ToLower() } else { $null }
         }
     }
-    
-    Write-Log "Normalized: $($script:NormalizedUsers.Count) users" -Level Success
-    Write-Host ""
-    $script:NormalizedUsers | Format-Table Username, Email -AutoSize
 }
-catch { Write-Log "CSV error: $_" -Level Error; exit 1 }
+
+Write-Log "Normalized: $($script:NormalizedUsers.Count) users" -Level Success
+
+# ============================================
+# Get Infisical Environments (mapping name -> slug)
+# ============================================
+$envMap = @{}
+$ic = $config.Infisical
+
+if (-not $SkipInfisical) {
+    Write-Section "Loading Infisical Environments"
+    
+    # Check CLI availability
+    $cliExists = Test-InfisicalCLI
+    if (-not $cliExists) {
+        Write-Log "Infisical CLI not found. Use -SkipInfisical to skip or install CLI." -Level Error
+        exit 1
+    }
+    
+    # Get environments from config
+    $envResult = Get-InfisicalEnvironments -ConfigEnvironments $ic.Environments
+    
+    if (-not $envResult.Success) {
+        Write-Log "Failed to load environments: $($envResult.Error)" -Level Error
+        Write-Log "Add 'Environments' hashtable to Infisical config section:" -Level Warning
+        Write-Log '  Environments = @{ "domain.name" = "slug" }' -Level Warning
+        exit 1
+    }
+    
+    $envMap = $envResult.Environments
+    
+    Write-Host ""
+    Write-Host "  Environment mapping:" -ForegroundColor Cyan
+    foreach ($key in $envMap.Keys) {
+        Write-Host "    '$key' -> '$($envMap[$key])'" -ForegroundColor Gray
+    }
+}
+
+# ============================================
+# Process Users: Check existing passwords and prepare data
+# ============================================
+Write-Section "Processing Users"
+
+$usersWithPasswords = @()
+$reusedCount = 0
+$generatedCount = 0
+$skippedCount = 0
+
+foreach ($u in $script:NormalizedUsers) {
+    $email = $u.Email
+    $fio = $u.Username
+    
+    # Extract login and domain from email
+    $login = $null
+    $domain = $null
+    if ($email -match "^([^@]+)@(.+)$") {
+        $login = $matches[1]
+        $domain = $matches[2]
+    }
+    
+    if (-not $login) {
+        Write-Host "  [SKIP] $fio - cannot extract login from email" -ForegroundColor Yellow
+        $skippedCount++
+        continue
+    }
+    
+    # Find environment slug for this domain
+    $envSlug = $null
+    if ($envMap.Count -gt 0) {
+        $envSlug = $envMap[$domain]
+    }
+    
+    if (-not $envSlug -and -not $SkipInfisical) {
+        Write-Host "  [SKIP] $fio - environment not found for domain '$domain'" -ForegroundColor Yellow
+        if ($DebugMode) {
+            Write-Host "    Available: $($envMap.Keys -join ', ')" -ForegroundColor DarkGray
+        }
+        $skippedCount++
+        continue
+    }
+    
+    # Check if password already exists in Infisical (in ANY environment)
+    $existingPassword = $null
+    $passwordSource = "generated"
+    $foundInEnv = $null
+    
+    if (-not $SkipInfisical) {
+        $existingSecret = Find-InfisicalSecretInAllEnvironments `
+            -FIO $fio `
+            -Login $login `
+            -ServiceToken $ic.ServiceToken `
+            -WorkspaceId $ic.WorkspaceId `
+            -EnvironmentMap $envMap `
+            -SecretPath $ic.SecretPath `
+            -ApiUrl $ic.ApiUrl
+        
+        if ($existingSecret.Found) {
+            $existingPassword = $existingSecret.Value
+            $passwordSource = "reused"
+            $foundInEnv = $existingSecret.EnvironmentName
+            $reusedCount++
+            Write-Host "  [REUSE] $fio ($login@$domain) - found in '$foundInEnv'" -ForegroundColor Cyan
+        }
+    }
+    
+    # Generate new password if not found
+    if (-not $existingPassword) {
+        $pwResult = New-SinglePassword -Username $fio -Config $config.PasswordGenerator
+        if ($pwResult.IsValid) {
+            $existingPassword = $pwResult.Password
+            $generatedCount++
+            Write-Host "  [NEW] $fio ($login@$domain)" -ForegroundColor Green
+        } else {
+            Write-Host "  [ERROR] $fio - password generation failed" -ForegroundColor Red
+            $skippedCount++
+            continue
+        }
+    }
+    
+    $usersWithPasswords += [PSCustomObject]@{
+        Username = $fio
+        Email = $email
+        Login = $login
+        Domain = $domain
+        EnvSlug = $envSlug
+        Password = $existingPassword
+        PasswordSource = $passwordSource
+        FoundInEnv = $foundInEnv
+    }
+}
+
+Write-Host ""
+Write-Log "Processed: $($usersWithPasswords.Count) users (reused: $reusedCount, generated: $generatedCount, skipped: $skippedCount)" -Level $(if ($skippedCount -gt 0) { "Warning" } else { "Success" })
+
+if ($usersWithPasswords.Count -eq 0) {
+    Write-Log "No users to process" -Level Warning
+    exit 0
+}
 
 # ============================================
 # Confirm
 # ============================================
-$requireConfirm = $true
-if ($config.Security -and $config.Security.RequireConfirmation) {
-    $requireConfirm = $config.Security.RequireConfirmation
-}
-
-if ($requireConfirm -and -not $Force -and -not $script:DryRunMode) {
-    Write-Host "`nACTIONS:`n  1. Generate passwords for $($script:NormalizedUsers.Count) users`n  2. Reset Zimbra passwords`n  3. Export to Infisical`n" -ForegroundColor Yellow
+if (-not $Force -and -not $script:DryRunMode) {
+    Write-Host "`nACTIONS:" -ForegroundColor Yellow
+    Write-Host "  1. Reset $($usersWithPasswords.Count) Zimbra passwords" -ForegroundColor Yellow
+    Write-Host "  2. Export to Infisical (per-domain environments)" -ForegroundColor Yellow
     if ($SkipZimbra) { Write-Host "  [SKIP] Zimbra reset" -ForegroundColor Yellow }
-    if ($SkipInfisical) { Write-Host "  [SKIP] Infisical" -ForegroundColor Yellow }
-    if ($DryRun) { Write-Host "  [DRYRUN] No changes" -ForegroundColor Cyan }
+    if ($SkipInfisical) { Write-Host "  [SKIP] Infisical export" -ForegroundColor Yellow }
+    if ($script:DryRunMode) { Write-Host "  [DRYRUN] No changes" -ForegroundColor Cyan }
     if ((Read-Host "Continue? (Y/N)") -notmatch "^[Yy]$") { Write-Log "Cancelled" -Level Warning; exit 0 }
 }
-
-# ============================================
-# Generate Passwords
-# ============================================
-Write-Section "Generating Passwords"
-$pwResults = New-BatchPasswords -Users $script:NormalizedUsers -Config $config.PasswordGenerator
-$validPw = @($pwResults | Where-Object { $_.IsValid })
-Write-Log "Generated: $($pwResults.Count), Valid: $($validPw.Count)" -Level Success
 
 # ============================================
 # Zimbra Reset
@@ -167,137 +268,153 @@ $zimbraResults = @()
 if (-not $SkipZimbra) {
     Write-Section "Resetting Zimbra Passwords"
     
-    # Connect to Zimbra
-    $connected = Initialize-ZimbraConnection `
-        -ServerUrl $config.Zimbra.ServerUrl `
-        -AdminUser $config.Zimbra.AdminUser `
-        -AdminPassword $config.Zimbra.AdminPassword `
-        -Domain $config.Zimbra.Domain `
-        -DebugMode:$DebugMode
+    $connected = Initialize-ZimbraConnection -ServerUrl $config.Zimbra.ServerUrl -AdminUser $config.Zimbra.AdminUser -AdminPassword $config.Zimbra.AdminPassword -Domain $config.Zimbra.Domain -DebugMode:$DebugMode
     
     if (-not $connected) {
         Write-Log "Failed to connect to Zimbra" -Level Error
         exit 1
     }
     
-    # Prepare users with passwords
-    $usersToReset = @()
-    foreach ($p in $validPw) {
-        $origUser = $script:NormalizedUsers | Where-Object { $_.Username -eq $p.Username } | Select-Object -First 1
-        $usersToReset += [PSCustomObject]@{
-            Username = $p.Username
-            Email = $origUser.Email
-            Password = $p.Password
+    # Prepare users for Zimbra reset
+    $zimbraUsers = @()
+    foreach ($u in $usersWithPasswords) {
+        $zimbraUsers += [PSCustomObject]@{
+            Username = $u.Username
+            Email = $u.Email
+            Password = $u.Password
         }
     }
     
-    $zimbraResults = Reset-BatchZimbraPasswords -UsersWithPasswords $usersToReset -WhatIf:$script:DryRunMode
+    $zimbraResults = Reset-BatchZimbraPasswords -UsersWithPasswords $zimbraUsers -WhatIf:$script:DryRunMode -DebugMode:$DebugMode
     
     $s = ($zimbraResults | Where-Object { $_.PasswordChanged }).Count
-    Write-Log "Zimbra: $s passwords changed" -Level $(if ($s -eq $validPw.Count) { "Success" } else { "Warning" })
+    Write-Log "Zimbra: $s changed" -Level $(if ($s -eq $usersWithPasswords.Count) { "Success" } else { "Warning" })
 } else {
-    Write-Section "Zimbra Reset - SKIPPED"
-    foreach ($p in $validPw) {
-        $origUser = $script:NormalizedUsers | Where-Object { $_.Username -eq $p.Username } | Select-Object -First 1
-        $zimbraResults += [PSCustomObject]@{ Username = $p.Username; Email = $origUser.Email; PasswordChanged = $true; Error = $null }
+    Write-Section "Zimbra - SKIPPED"
+    foreach ($u in $usersWithPasswords) {
+        $zimbraResults += [PSCustomObject]@{ 
+            Username = $u.Username
+            Email = $u.Email
+            PasswordChanged = $true 
+        }
     }
 }
 
 # ============================================
-# Export to Infisical
+# Export to Infisical (per-domain environment)
 # ============================================
-$infResults = @()
-
-if (-not $SkipInfisical) {
+if ($SkipInfisical) {
+    Write-Section "Infisical - SKIPPED"
+} else {
     Write-Section "Exporting to Infisical"
     
-    $ic = $config.Infisical
+    $successCount = 0
+    $errorCount = 0
+    $infResults = @()
     
-    $cliExists = Test-InfisicalCLI
-    
-    if (-not $cliExists) {
-        Write-Log "Infisical CLI not found" -Level Error
-        Write-Log "Install: https://github.com/Infisical/infisical/releases/latest" -Level Warning
-        exit 1
-    }
-    
-    $secrets = @()
-    foreach ($p in $validPw) {
-        $zim = $zimbraResults | Where-Object { $_.Username -eq $p.Username } | Select-Object -First 1
-        if ($zim -and ($zim.PasswordChanged -or $SkipZimbra)) {
-            $secrets += [PSCustomObject]@{
-                Username = $p.Username
-                SamAccountName = $zim.Email
-                Email = $zim.Email
-                Password = $p.Password
+    foreach ($u in $usersWithPasswords) {
+        $zim = $zimbraResults | Where-Object { $_.Username -eq $u.Username } | Select-Object -First 1
+        
+        if (-not $zim -or -not $zim.PasswordChanged) {
+            Write-Host "  [SKIP] $($u.Username) - Zimbra password not changed" -ForegroundColor DarkGray
+            continue
+        }
+        
+        # Secret key format: "Фамилия Имя Отчество (login)"
+        $secretKey = "$($u.Username) ($($u.Login))"
+        
+        Write-Host "  Exporting: $secretKey" -NoNewline
+        Write-Host " [env=$($u.Domain), slug=$($u.EnvSlug)]" -NoNewline -ForegroundColor DarkGray
+        
+        if ($script:DryRunMode) {
+            Write-Host " [DRYRUN]" -ForegroundColor Cyan
+            $infResults += [PSCustomObject]@{
+                Username = $u.Username
+                SecretKey = $secretKey
+                Environment = $u.Domain
+                Success = $true
+                Error = $null
             }
+            $successCount++
+            continue
+        }
+        
+        Write-Host " ..." -NoNewline
+        
+        $r = Set-InfisicalSecretCLI `
+            -ServiceToken $ic.ServiceToken `
+            -WorkspaceId $ic.WorkspaceId `
+            -Environment $u.EnvSlug `
+            -SecretPath $ic.SecretPath `
+            -SecretKey $secretKey `
+            -SecretValue $u.Password `
+            -ApiUrl $ic.ApiUrl
+        
+        $infResults += [PSCustomObject]@{
+            Username = $u.Username
+            SecretKey = $secretKey
+            Environment = $u.Domain
+            Success = $r.Success
+            Error = $r.Error
+        }
+        
+        if ($r.Success) {
+            Write-Host " OK" -ForegroundColor Green
+            $successCount++
+        } else {
+            Write-Host " ERROR" -ForegroundColor Red
+            if ($r.Error) {
+                $errLines = $r.Error -split "`n" | Select-Object -First 3
+                foreach ($line in $errLines) {
+                    if ($line) { Write-Host "    $line" -ForegroundColor DarkGray }
+                }
+            }
+            $errorCount++
         }
     }
     
-    Write-Log "Exporting $($secrets.Count) secrets" -Level Info
-    
-    if ($secrets.Count -gt 0) {
-        $infResults = Import-BatchSecretsCLI `
-            -ServiceToken $ic.ServiceToken `
-            -WorkspaceId $ic.WorkspaceId `
-            -Environment $ic.Environment `
-            -SecretPath $ic.SecretPath `
-            -Secrets $secrets `
-            -ApiUrl $ic.ApiUrl
-    }
-} else {
-    Write-Section "Infisical - SKIPPED"
+    Write-Log "Infisical: $successCount exported, $errorCount errors" -Level $(if ($errorCount -eq 0) { "Success" } else { "Warning" })
 }
 
 # ============================================
 # Backup
 # ============================================
-$saveBackup = $true
-if ($config.IO.SaveLocalBackup -ne $null) {
-    $saveBackup = $config.IO.SaveLocalBackup
-}
+Write-Section "Backup"
+$bp = if ($config.IO.BackupPath) { $config.IO.BackupPath } else { ".\backup" }
+if (-not (Test-Path $bp)) { New-Item -ItemType Directory -Path $bp -Force | Out-Null }
+$bf = Join-Path $bp "zimbra-passwords-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
 
-if ($saveBackup) {
-    Write-Section "Saving Backup"
-    $bp = $config.IO.BackupPath; if (-not $bp) { $bp = ".\backup" }
-    if (-not (Test-Path $bp)) { New-Item -ItemType Directory -Path $bp -Force | Out-Null }
-    $bf = Join-Path $bp "zimbra-passwords-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
-    $bd = @()
-    foreach ($p in $validPw) {
-        $zim = $zimbraResults | Where-Object { $_.Username -eq $p.Username } | Select-Object -First 1
-        $bd += [PSCustomObject]@{ Username = $p.Username; Email = $zim.Email; Password = $p.Password; Strength = $p.Strength; Timestamp = $p.Timestamp }
-    }
-    $bd | Export-Csv -Path $bf -NoTypeInformation -Encoding UTF8 -Delimiter ";"
-    Write-Log "Backup: $bf" -Level Success
-}
-
-# ============================================
-# Report
-# ============================================
-Write-Section "Report"
-$rp = ".\zimbra-report-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
-$report = @()
-foreach ($u in $script:NormalizedUsers) {
-    $pw = $pwResults | Where-Object { $_.Username -eq $u.Username } | Select-Object -First 1
+$bd = @()
+foreach ($u in $usersWithPasswords) {
     $zim = $zimbraResults | Where-Object { $_.Username -eq $u.Username } | Select-Object -First 1
     $inf = $infResults | Where-Object { $_.Username -eq $u.Username } | Select-Object -First 1
-    $report += [PSCustomObject]@{
+    $bd += [PSCustomObject]@{ 
         Username = $u.Username
+        Login = $u.Login
         Email = $u.Email
-        PasswordGenerated = $pw.IsValid
-        ZimbraPasswordChanged = $zim.PasswordChanged
-        InfisicalExported = $inf.Success
+        Domain = $u.Domain
+        Password = $u.Password
+        PasswordSource = $u.PasswordSource
+        FoundInEnv = $u.FoundInEnv
+        ZimbraChanged = $zim.PasswordChanged
+        InfisicalExported = if ($inf) { $inf.Success } else { $false }
         Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     }
 }
-$report | Export-Csv -Path $rp -NoTypeInformation -Encoding UTF8 -Delimiter ";"
-Write-Log "Report: $rp" -Level Success
+$bd | Export-Csv -Path $bf -NoTypeInformation -Encoding UTF8 -Delimiter ";"
+Write-Log "Backup: $bf" -Level Success
 
 # ============================================
 # Summary
 # ============================================
 Write-Header "SUMMARY"
 $d = (Get-Date) - $script:StartTime
-Write-Host "Time: $($d.ToString('mm\:ss'))`nUsers: $($script:NormalizedUsers.Count)`nPasswords: $($validPw.Count)" -ForegroundColor Cyan
+Write-Host "Time: $($d.ToString('mm\:ss'))" -ForegroundColor Cyan
+Write-Host "Users in CSV: $($script:NormalizedUsers.Count)" -ForegroundColor Cyan
+Write-Host "Users processed: $($usersWithPasswords.Count)" -ForegroundColor Cyan
+Write-Host "  - Reused passwords: $reusedCount" -ForegroundColor Cyan
+Write-Host "  - Generated passwords: $generatedCount" -ForegroundColor Cyan
+Write-Host "  - Skipped: $skippedCount" -ForegroundColor $(if ($skippedCount -gt 0) { "Yellow" } else { "Cyan" })
+
 if ($script:DryRunMode) { Write-Host "`nDRYRUN - NO CHANGES MADE" -ForegroundColor Yellow }
 Write-Log "Completed" -Level Success
